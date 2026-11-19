@@ -14,7 +14,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "seed:tuitions": "node scripts/seed-tuitions.js"
+    "seed:tuitions": "node scripts/seed-tuitions.js",
+    "test": "node --test"
   },
   "dependencies": {
     "better-auth": "^1.7.25",

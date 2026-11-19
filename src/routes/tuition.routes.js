@@ -6,6 +6,11 @@ import {
   verifyTutor,
   verifyAdmin,
 } from '../middleware/auth.middleware.js';
+import {
+  getApprovalUpdate,
+  getNewTuitionState,
+  getPublicTuitionFilter,
+} from '../utils/tuition-status.js';
 
 const TUITIONS_COLLECTION = 'tuitions';
 const USERS_COLLECTION = 'user';
@@ -272,10 +277,7 @@ async function loadTutorProfile(userId) {
 }
 
 function applyPublicFilters(query) {
-  const filter = {
-    approvalStatus: 'approved',
-    isActive: true,
-  };
+  const filter = getPublicTuitionFilter();
 
   if (query.mode !== undefined) {
     if (typeof query.mode !== 'string' || !MODES.has(query.mode)) {
@@ -544,8 +546,7 @@ router.post('/', verifyToken, verifyTutor, async (req, res) => {
     tutorId: userId,
     tutorName: tutor.name ?? '',
     tutorEmail: tutor.email ?? '',
-    approvalStatus: 'pending',
-    isActive: false,
+    ...getNewTuitionState(),
     createdAt: new Date(),
   };
 
@@ -842,12 +843,7 @@ adminTuitionRouter.patch(
     const approved = body.approvalStatus === 'approved';
     const updated = await collection.findOneAndUpdate(
       { _id: tuitionId },
-      {
-        $set: {
-          approvalStatus: body.approvalStatus,
-          isActive: approved,
-        },
-      },
+      { $set: getApprovalUpdate(body.approvalStatus) },
       { returnDocument: 'after', projection: TUITION_PROJECTION }
     );
 
