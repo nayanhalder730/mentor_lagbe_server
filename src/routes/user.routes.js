@@ -2,6 +2,16 @@ import { Router } from 'express';
 import { ObjectId } from 'mongodb';
 import { getDb } from '../config/db.js';
 import { verifyToken, verifyAdmin } from '../middleware/auth.middleware.js';
+import {
+  SAFE_USER_PROJECTION,
+  SELF_UPDATABLE_FIELDS,
+  USER_ROLES,
+  buildRoleChangeUpdate,
+  describeRoleChangeConflict,
+  isSelfRoleChange,
+  toSafeProfile,
+  validateRoleChangeBody,
+} from '../utils/user-management.js';
 
 const router = Router();
 
@@ -9,41 +19,8 @@ const router = Router();
 // collection and maps its `id` field to MongoDB's `_id`.
 const USERS_COLLECTION = 'user';
 
-const ALLOWED_ROLES = new Set(['student', 'tutor', 'admin']);
-const ALLOWED_PLANS = new Set(['free', 'pro']);
-const UPDATABLE_FIELDS = new Set(['name', 'image', 'phone', 'bio']);
-
-const PROFILE_PROJECTION = {
-  name: 1,
-  email: 1,
-  image: 1,
-  role: 1,
-  phone: 1,
-  bio: 1,
-  plan: 1,
-  createdAt: 1,
-};
-
 function usersCollection() {
   return getDb().collection(USERS_COLLECTION);
-}
-
-/**
- * Converts a Better Auth user document into the safe profile shape required
- * by the assignment. Internal auth fields are never included.
- */
-function toSafeProfile(document) {
-  return {
-    id: document._id.toString(),
-    name: document.name,
-    email: document.email,
-    image: document.image || null,
-    role: ALLOWED_ROLES.has(document.role) ? document.role : 'student',
-    phone: document.phone || null,
-    bio: document.bio || null,
-    plan: ALLOWED_PLANS.has(document.plan) ? document.plan : 'free',
-    createdAt: document.createdAt ?? null,
-  };
 }
 
 function toObjectId(id) {
@@ -169,7 +146,7 @@ router.get('/me', verifyToken, async (req, res) => {
 
   const profile = await usersCollection().findOne(
     { _id: userId },
-    { projection: PROFILE_PROJECTION }
+    { projection: SAFE_USER_PROJECTION }
   );
 
   if (!profile) {
@@ -202,7 +179,7 @@ router.patch('/me', verifyToken, async (req, res) => {
   }
 
   const bodyFields = Object.keys(body);
-  const unsupportedFields = bodyFields.filter((field) => !UPDATABLE_FIELDS.has(field));
+  const unsupportedFields = bodyFields.filter((field) => !SELF_UPDATABLE_FIELDS.has(field));
 
   if (unsupportedFields.length > 0) {
     return res.status(400).json({
@@ -247,7 +224,7 @@ router.patch('/me', verifyToken, async (req, res) => {
     { $set: { ...updates, updatedAt: new Date() } },
     {
       returnDocument: 'after',
-      projection: PROFILE_PROJECTION,
+      projection: SAFE_USER_PROJECTION,
     }
   );
 
@@ -308,7 +285,7 @@ router.get('/', verifyToken, verifyAdmin, async (req, res) => {
   const filter = {};
 
   if (req.query.role !== undefined) {
-    if (typeof req.query.role !== 'string' || !ALLOWED_ROLES.has(req.query.role)) {
+    if (typeof req.query.role !== 'string' || !USER_ROLES.has(req.query.role)) {
       return res.status(400).json({
         success: false,
         message: 'role must be one of: student, tutor, admin',
@@ -345,7 +322,7 @@ router.get('/', verifyToken, verifyAdmin, async (req, res) => {
   const collection = usersCollection();
   const total = await collection.countDocuments(filter);
   const users = await collection
-    .find(filter, { projection: PROFILE_PROJECTION })
+    .find(filter, { projection: SAFE_USER_PROJECTION })
     .sort({ createdAt: -1, _id: -1 })
     .skip((page - 1) * limit)
     .limit(limit)
@@ -363,6 +340,68 @@ router.get('/', verifyToken, verifyAdmin, async (req, res) => {
         totalPages: Math.ceil(total / limit),
       },
     },
+  });
+});
+
+/**
+ * PATCH /api/users/:id/role
+ * Admin-only role changes for student/tutor accounts. Admin accounts are not
+ * modifiable here, and an admin cannot change their own role.
+ */
+router.patch('/:id/role', verifyToken, verifyAdmin, async (req, res) => {
+  const validated = validateRoleChangeBody(req.body);
+
+  if (validated.error) {
+    return res.status(400).json({
+      success: false,
+      message: validated.error,
+    });
+  }
+
+  const targetId = toObjectId(req.params.id);
+  const adminId = toObjectId(req.user.id);
+
+  if (!targetId || !adminId) {
+    return res.status(404).json({
+      success: false,
+      message: 'User not found',
+    });
+  }
+
+  if (isSelfRoleChange(adminId, targetId)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Admins cannot change their own role',
+    });
+  }
+
+  const { filter, update } = buildRoleChangeUpdate(targetId, validated.value);
+
+  const collection = usersCollection();
+  const updated = await collection.findOneAndUpdate(filter, update, {
+    returnDocument: 'after',
+    projection: SAFE_USER_PROJECTION,
+  });
+
+  if (!updated) {
+    // Diagnostic read only after the atomic update failed. It never returns
+    // another user's profile fields.
+    const current = await collection.findOne(
+      { _id: targetId },
+      { projection: { role: 1 } }
+    );
+    const conflict = describeRoleChangeConflict(current);
+
+    return res.status(conflict.status).json({
+      success: false,
+      message: conflict.message,
+    });
+  }
+
+  return res.json({
+    success: true,
+    message: 'User role updated successfully',
+    data: toSafeProfile(updated),
   });
 });
 
