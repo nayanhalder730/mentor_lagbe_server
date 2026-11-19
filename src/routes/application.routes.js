@@ -6,6 +6,12 @@ import {
   verifyStudent,
   verifyTutor,
 } from '../middleware/auth.middleware.js';
+import {
+  buildCancelApplicationFilter,
+  buildOwnedApplicationFilter,
+  getCancellationOutcome,
+  parseApplicationId,
+} from '../utils/application-cancellation.js';
 
 const APPLICATIONS_COLLECTION = 'applications';
 const TUITIONS_COLLECTION = 'tuitions';
@@ -556,6 +562,46 @@ router.patch('/:id/status', verifyToken, verifyTutor, async (req, res) => {
     success: true,
     message: `Application ${body.status}`,
     data: toApplicationResponse(updated),
+  });
+});
+
+/**
+ * DELETE /api/applications/:id
+ * Students cancel only their own pending applications. The student id comes
+ * from the verified token, and both ownership and `status: 'pending'` are part
+ * of the delete filter so a concurrent tutor decision cannot be bypassed.
+ */
+router.delete('/:id', verifyToken, verifyStudent, async (req, res) => {
+  const applicationId = parseApplicationId(req.params.id);
+  const studentId = parseApplicationId(req.user.id);
+
+  if (!applicationId || !studentId) {
+    return res.status(404).json({
+      success: false,
+      message: 'Application not found',
+    });
+  }
+
+  const collection = applicationsCollection();
+  const result = await collection.deleteOne(
+    buildCancelApplicationFilter(applicationId, studentId)
+  );
+
+  // Non-owners and missing applications are indistinguishable: the lookup is
+  // scoped to the same student, so no one else's data is revealed.
+  const current =
+    result.deletedCount > 0
+      ? null
+      : await collection.findOne(
+          buildOwnedApplicationFilter(applicationId, studentId),
+          { projection: { status: 1 } }
+        );
+
+  const outcome = getCancellationOutcome(result.deletedCount, current);
+
+  return res.status(outcome.status).json({
+    success: outcome.success,
+    message: outcome.message,
   });
 });
 
