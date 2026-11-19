@@ -12,6 +12,12 @@ import {
   getCancellationOutcome,
   parseApplicationId,
 } from '../utils/application-cancellation.js';
+import {
+  buildStudentApplicationsFilter,
+  buildTutorIdQuery,
+  collectTutorIds,
+  toStudentApplicationList,
+} from '../utils/application-tutor.js';
 
 const APPLICATIONS_COLLECTION = 'applications';
 const TUITIONS_COLLECTION = 'tuitions';
@@ -363,7 +369,7 @@ router.get('/my', verifyToken, verifyStudent, async (req, res) => {
     });
   }
 
-  const filter = { studentId };
+  const filter = buildStudentApplicationsFilter(studentId);
   const collection = applicationsCollection();
   const total = await collection.countDocuments(filter);
   const applications = await collection
@@ -373,11 +379,25 @@ router.get('/my', verifyToken, verifyStudent, async (req, res) => {
     .limit(limit)
     .toArray();
 
+  // One batched lookup for the whole page; the user projection is limited to
+  // `name` so no unrelated tutor profile fields are read or returned.
+  const tutorIds = collectTutorIds(applications);
+  const tutors =
+    tutorIds.length > 0
+      ? await usersCollection()
+          .find(buildTutorIdQuery(tutorIds), { projection: { name: 1 } })
+          .toArray()
+      : [];
+
   return res.json({
     success: true,
     message: 'Applications retrieved successfully',
     data: {
-      applications: applications.map(toApplicationResponse),
+      applications: toStudentApplicationList(
+        applications,
+        tutors,
+        toApplicationResponse
+      ),
       pagination: {
         page,
         limit,
