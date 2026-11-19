@@ -10,6 +10,7 @@ import paymentRoutes, {
   paymentWebhookRouter,
   adminPaymentRouter,
 } from './routes/payment.routes.js';
+import dashboardRoutes from './routes/dashboard.routes.js';
 import { notFoundHandler } from './middleware/not-found.middleware.js';
 import { errorHandler } from './middleware/error.middleware.js';
 
@@ -55,6 +56,7 @@ app.use('/api/admin/tuitions', adminTuitionRouter);
 app.use('/api/applications', applicationRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/admin/payments', adminPaymentRouter);
+app.use('/api/dashboard', dashboardRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
