@@ -5,6 +5,7 @@ import userRoutes from './routes/user.routes.js';
 import tuitionRoutes, {
   adminTuitionRouter,
 } from './routes/tuition.routes.js';
+import applicationRoutes from './routes/application.routes.js';
 import { notFoundHandler } from './middleware/not-found.middleware.js';
 import { errorHandler } from './middleware/error.middleware.js';
 
@@ -39,6 +40,7 @@ app.use('/api/health', healthRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/tuitions', tuitionRoutes);
 app.use('/api/admin/tuitions', adminTuitionRouter);
+app.use('/api/applications', applicationRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
