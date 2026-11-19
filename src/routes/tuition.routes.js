@@ -7,9 +7,14 @@ import {
   verifyAdmin,
 } from '../middleware/auth.middleware.js';
 import {
+  buildOwnedTuitionFilter,
+  buildTutorStatusUpdate,
+  describeTutorStatusConflict,
   getApprovalUpdate,
   getNewTuitionState,
   getPublicTuitionFilter,
+  getTutorStatusMessage,
+  validateTutorStatusBody,
 } from '../utils/tuition-status.js';
 
 const TUITIONS_COLLECTION = 'tuitions';
@@ -931,5 +936,68 @@ adminTuitionRouter.patch(
     });
   }
 );
+
+/**
+ * PATCH /api/tuitions/:id/status
+ * Tutors activate or deactivate only their own approved tuitions. Ownership
+ * and approval are part of the atomic update filter, so a pending/rejected
+ * tuition can never be toggled through this endpoint.
+ */
+router.patch('/:id/status', verifyToken, verifyTutor, async (req, res) => {
+  const validated = validateTutorStatusBody(req.body);
+
+  if (validated.error) {
+    return res.status(400).json({
+      success: false,
+      message: validated.error,
+    });
+  }
+
+  const tuitionId = toObjectId(req.params.id);
+  const tutorId = toObjectId(req.user.id);
+
+  if (!tuitionId || !tutorId) {
+    return res.status(404).json({
+      success: false,
+      message: 'Tuition not found',
+    });
+  }
+
+  const { filter, update } = buildTutorStatusUpdate(
+    tuitionId,
+    tutorId,
+    validated.value
+  );
+
+  const collection = tuitionsCollection();
+  const updated = await collection.findOneAndUpdate(
+    filter,
+    update,
+    { returnDocument: 'after', projection: TUITION_PROJECTION }
+  );
+
+  if (!updated) {
+    // Ownership-scoped lookup: a different tutor's tuition is indistinguish-
+    // able from a missing one. This is only a diagnostic read after the
+    // atomic update failed, never a read-then-update sequence.
+    const current = await collection.findOne(
+      buildOwnedTuitionFilter(tuitionId, tutorId),
+      { projection: { approvalStatus: 1 } }
+    );
+
+    const conflict = describeTutorStatusConflict(current);
+
+    return res.status(conflict.status).json({
+      success: false,
+      message: conflict.message,
+    });
+  }
+
+  return res.json({
+    success: true,
+    message: getTutorStatusMessage(validated.value),
+    data: toTuitionResponse(updated),
+  });
+});
 
 export default router;
