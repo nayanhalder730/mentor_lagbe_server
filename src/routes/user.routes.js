@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { ObjectId } from 'mongodb';
 import { getDb } from '../config/db.js';
-import { verifyToken, verifyAdmin } from '../middleware/auth.middleware.js';
+import { verifyToken, verifyAdmin, verifyStudent } from '../middleware/auth.middleware.js';
 import {
   SAFE_USER_PROJECTION,
   SELF_UPDATABLE_FIELDS,
@@ -12,6 +12,17 @@ import {
   toSafeProfile,
   validateRoleChangeBody,
 } from '../utils/user-management.js';
+import {
+  TUITION_PROJECTION,
+  toTuitionResponse,
+} from '../routes/tuition.routes.js';
+import {
+  buildRemoveTuitionUpdate,
+  buildSaveTuitionUpdate,
+  buildSavedTuitionsFilter,
+  getSavedTuitionIds,
+  parseTuitionId,
+} from '../utils/saved-tuitions.js';
 
 const router = Router();
 
@@ -239,6 +250,161 @@ router.patch('/me', verifyToken, async (req, res) => {
     success: true,
     message: 'Profile updated successfully',
     data: toSafeProfile(updatedProfile),
+  });
+});
+
+function tuitionsCollection() {
+  return getDb().collection('tuitions');
+}
+
+/**
+ * GET /api/users/me/saved-tuitions
+ * Student-only list of their saved tuitions. Only approved, active tuitions
+ * are returned, even if a saved id became unpublished since it was stored.
+ */
+router.get('/me/saved-tuitions', verifyToken, verifyStudent, async (req, res) => {
+  const page = parsePositiveInteger(req.query.page, 1);
+  const limit = parsePositiveInteger(req.query.limit, 20);
+
+  if (page === null) {
+    return res.status(400).json({
+      success: false,
+      message: 'page must be a positive integer',
+    });
+  }
+
+  if (limit === null || limit > 100) {
+    return res.status(400).json({
+      success: false,
+      message: 'limit must be a positive integer between 1 and 100',
+    });
+  }
+
+  const userId = toObjectId(req.user.id);
+
+  if (!userId) {
+    return res.status(404).json({
+      success: false,
+      message: 'Profile not found',
+    });
+  }
+
+  const user = await usersCollection().findOne(
+    { _id: userId },
+    { projection: { savedTuitionIds: 1 } }
+  );
+
+  if (!user) {
+    return res.status(404).json({
+      success: false,
+      message: 'Profile not found',
+    });
+  }
+
+  const tuitionIds = getSavedTuitionIds(user).map((id) => new ObjectId(id));
+  const filter = buildSavedTuitionsFilter(tuitionIds);
+  const collection = tuitionsCollection();
+  const total = await collection.countDocuments(filter);
+  const tuitions = await collection
+    .find(filter, { projection: TUITION_PROJECTION })
+    .sort({ createdAt: -1, _id: -1 })
+    .skip((page - 1) * limit)
+    .limit(limit)
+    .toArray();
+
+  return res.json({
+    success: true,
+    message: 'Saved tuitions retrieved successfully',
+    data: {
+      tuitions: tuitions.map(toTuitionResponse),
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    },
+  });
+});
+
+/**
+ * POST /api/users/me/saved-tuitions/:tuitionId
+ * Student-only save. Identity comes from the JWT; `$ne` + `$addToSet` makes
+ * the operation atomic and duplicate-safe.
+ */
+router.post('/me/saved-tuitions/:tuitionId', verifyToken, verifyStudent, async (req, res) => {
+  const tuitionId = parseTuitionId(req.params.tuitionId);
+  const userId = toObjectId(req.user.id);
+
+  if (!tuitionId || !userId) {
+    return res.status(404).json({
+      success: false,
+      message: 'Tuition not found',
+    });
+  }
+
+  const tuition = await tuitionsCollection().findOne(
+    { _id: tuitionId, approvalStatus: 'approved', isActive: true },
+    { projection: { _id: 1 } }
+  );
+
+  if (!tuition) {
+    return res.status(404).json({
+      success: false,
+      message: 'Tuition not found',
+    });
+  }
+
+  const { filter, update } = buildSaveTuitionUpdate(userId, tuitionId);
+  const result = await usersCollection().findOneAndUpdate(filter, update, {
+    projection: { _id: 1 },
+  });
+
+  if (!result) {
+    return res.status(409).json({
+      success: false,
+      message: 'Tuition is already saved',
+    });
+  }
+
+  return res.status(201).json({
+    success: true,
+    message: 'Tuition saved successfully',
+    data: { tuitionId: tuitionId.toString(), saved: true },
+  });
+});
+
+/**
+ * DELETE /api/users/me/saved-tuitions/:tuitionId
+ * Removes the id from the authenticated student's own saved list only.
+ */
+router.delete('/me/saved-tuitions/:tuitionId', verifyToken, verifyStudent, async (req, res) => {
+  const tuitionId = parseTuitionId(req.params.tuitionId);
+  const userId = toObjectId(req.user.id);
+
+  if (!tuitionId || !userId) {
+    return res.status(404).json({
+      success: false,
+      message: 'Saved tuition not found',
+    });
+  }
+
+  const { filter, update } = buildRemoveTuitionUpdate(userId, tuitionId);
+  const result = await usersCollection().findOneAndUpdate(filter, update, {
+    projection: { _id: 1 },
+  });
+
+  if (!result) {
+    return res.status(404).json({
+      success: false,
+      message: 'Saved tuition not found',
+    });
+  }
+
+  return res.json({
+    success: true,
+    message: 'Tuition removed from saved successfully',
+    data: { tuitionId: tuitionId.toString(), saved: false },
   });
 });
 

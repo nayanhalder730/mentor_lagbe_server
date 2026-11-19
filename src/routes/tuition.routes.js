@@ -48,7 +48,7 @@ const REQUIRED_FIELDS = [
 ];
 
 // Public/user-facing shape. Internal `tutorId` is never exposed.
-const TUITION_PROJECTION = {
+export const TUITION_PROJECTION = {
   title: 1,
   subject: 1,
   classLevel: 1,
@@ -84,7 +84,7 @@ function toObjectId(id) {
   return new ObjectId(id);
 }
 
-function toTuitionResponse(document) {
+export function toTuitionResponse(document) {
   return {
     id: document._id.toString(),
     title: document.title,
