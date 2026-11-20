@@ -18,6 +18,10 @@ import {
   collectTutorIds,
   toStudentApplicationList,
 } from '../utils/application-tutor.js';
+import {
+  buildApplicationCheckFilter,
+  parseCheckTuitionId,
+} from '../utils/application-check.js';
 
 const APPLICATIONS_COLLECTION = 'applications';
 const TUITIONS_COLLECTION = 'tuitions';
@@ -335,6 +339,42 @@ router.post('/', verifyToken, verifyStudent, async (req, res) => {
     success: true,
     message: 'Application submitted successfully',
     data: toApplicationResponse(document),
+  });
+});
+
+/**
+ * GET /api/applications/check?tuitionId=<id>
+ * Minimal, student-scoped existence check for one tuition. No application
+ * fields are returned, and identity comes only from the verified JWT.
+ */
+router.get('/check', verifyToken, verifyStudent, async (req, res) => {
+  const tuitionId = parseCheckTuitionId(req.query.tuitionId);
+
+  if (!tuitionId) {
+    return res.status(400).json({
+      success: false,
+      message: 'tuitionId must be a valid tuition id',
+    });
+  }
+
+  const studentId = toObjectId(req.user.id);
+
+  if (!studentId) {
+    return res.status(404).json({
+      success: false,
+      message: 'Student profile not found',
+    });
+  }
+
+  const existing = await applicationsCollection().findOne(
+    buildApplicationCheckFilter(studentId, tuitionId),
+    { projection: { _id: 1 } }
+  );
+
+  return res.json({
+    success: true,
+    message: 'Application check completed',
+    data: { hasApplied: Boolean(existing) },
   });
 });
 
