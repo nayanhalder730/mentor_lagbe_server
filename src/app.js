@@ -39,6 +39,17 @@ app.use((req, res, next) => {
   next();
 });
 
+// Bare API root: a lightweight response so the deployed origin does not look
+// broken. Detailed database status remains at GET /api/health.
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    service: 'MentorLagbe API',
+    status: 'ok',
+    health: '/api/health',
+  });
+});
+
 // Stripe signs the raw request body, so this route must be mounted before the
 // global JSON parser. All other routes keep using express.json() unchanged.
 app.use(

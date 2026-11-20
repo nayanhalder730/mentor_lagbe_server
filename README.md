@@ -2,8 +2,30 @@
 
 Express REST API for **MentorLagbe**. It provides public tuition browsing, JWT-protected student/tutor/admin workflows, Better Auth JWKS verification, admin moderation, dashboard statistics and Stripe subscription handling.
 
-> Deployment URL: **TODO — add the verified live API URL here after deployment.**
-> No live URL is committed in this repository.
+> Server live URL: **NOT PROVIDED — no verified live API URL exists in the repository.**
+> Add the real deployed URL only after deployment is confirmed.
+
+---
+
+## Repository URLs
+
+- Server: https://github.com/nayanhalder730/mentor_lagbe_server
+- Client: https://github.com/nayanhalder730/mentor_lagbe_client
+
+---
+
+## Submission Information
+
+| Item | Value |
+| --- | --- |
+| Admin credentials | **NOT PROVIDED** — no verified admin credentials exist in the repository. |
+| Tutor test credentials | **NOT PROVIDED** — no verified tutor credentials exist in the repository. |
+| Live site URL (client) | **NOT PROVIDED** — no verified deployment URL exists in the repository. |
+| Live API URL (server) | **NOT PROVIDED** — no verified deployment URL exists in the repository. |
+| Client repository | https://github.com/nayanhalder730/mentor_lagbe_client |
+| Server repository | https://github.com/nayanhalder730/mentor_lagbe_server |
+
+Do not invent credentials or URLs for submission; add only verified values.
 
 ---
 
@@ -32,6 +54,23 @@ Express REST API for **MentorLagbe**. It provides public tuition browsing, JWT-p
 | Payments | Stripe Checkout + webhooks |
 | Config | `dotenv` |
 | Tests | Node's built-in `node:test` runner |
+
+---
+
+## Main npm packages
+
+| Package | Purpose |
+| --- | --- |
+| `express`, `cors` | HTTP API and CORS |
+| `mongodb` | MongoDB driver and collections |
+| `better-auth` | Better Auth integration/library |
+| `jose` | JWT verification against the Better Auth JWKS |
+| `jsonwebtoken` | JWT utility dependency present in the project |
+| `stripe` | Checkout sessions and webhook verification |
+| `dotenv` | Environment loading |
+| `nodemon` | Development auto-reload |
+
+Tests use Node's built-in `node:test`; no test framework dependency is installed.
 
 ---
 

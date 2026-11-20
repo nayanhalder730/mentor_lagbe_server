@@ -13,7 +13,7 @@ const USERS_COLLECTION = 'user';
 
 // Server-side price catalog. Prices are never accepted from the client and
 // always derive from the role stored in the database.
-const PLAN_CATALOG = {
+export const PLAN_CATALOG = {
   student: {
     planName: 'Student Pro',
     amount: 10,
@@ -28,12 +28,12 @@ const PLAN_CATALOG = {
   },
 };
 
-const PAYMENT_EVENTS = new Set([
+export const PAYMENT_EVENTS = new Set([
   'checkout.session.completed',
   'checkout.session.async_payment_succeeded',
 ]);
 
-const DOWNGRADE_SUBSCRIPTION_STATUSES = new Set([
+export const DOWNGRADE_SUBSCRIPTION_STATUSES = new Set([
   'canceled',
   'unpaid',
   'incomplete_expired',
@@ -173,7 +173,7 @@ function parsePositiveInteger(value, fallback) {
  * Resolves the configured client origin for Stripe redirects.
  * Supports the same comma-separated format used for CORS origins.
  */
-function resolveClientUrl() {
+export function resolveClientUrl() {
   const configured = process.env.CLIENT_URL || DEFAULT_CLIENT_URL;
   const firstOrigin = configured
     .split(',')
@@ -197,7 +197,7 @@ function resolveClientUrl() {
   return firstOrigin.replace(/\/+$/, '');
 }
 
-function normalizeStripeId(value) {
+export function normalizeStripeId(value) {
   if (typeof value === 'string' && value !== '') {
     return value;
   }
@@ -213,7 +213,7 @@ function normalizeStripeId(value) {
  * Rejects any client-supplied checkout fields. Amounts, roles, plans, and
  * identity are always resolved from the authenticated database user.
  */
-function hasClientCheckoutOverrides(body) {
+export function hasClientCheckoutOverrides(body) {
   if (body === undefined || body === null) {
     return false;
   }
@@ -223,6 +223,66 @@ function hasClientCheckoutOverrides(body) {
   }
 
   return Object.keys(body).length > 0;
+}
+
+/** Resolves the server-controlled plan for a database role. */
+export function getPlanForRole(role) {
+  return PLAN_CATALOG[role] ?? null;
+}
+
+/** Maps a verified Stripe event to the database action it should trigger. */
+export function getWebhookAction(event) {
+  if (!event || typeof event !== 'object') return null;
+
+  if (PAYMENT_EVENTS.has(event.type)) return 'payment';
+
+  if (event.type === 'customer.subscription.deleted') return 'downgrade';
+
+  if (
+    event.type === 'customer.subscription.updated' &&
+    DOWNGRADE_SUBSCRIPTION_STATUSES.has(event.data?.object?.status)
+  ) {
+    return 'downgrade';
+  }
+
+  return null;
+}
+
+/** Builds the persisted payment record from verified Stripe event data. */
+export function buildPaymentRecord(event, session, user, plan) {
+  const amountTotal = Number.isSafeInteger(session.amount_total)
+    ? session.amount_total
+    : plan.unitAmount;
+  const paidAt = Number.isFinite(event.created)
+    ? new Date(event.created * 1000)
+    : new Date();
+
+  return {
+    userEmail: user.email ?? '',
+    userName: user.name ?? '',
+    userRole: user.role,
+    planName: plan.planName,
+    // Stripe reports minor units; store major currency units (10 = $10.00).
+    amount: Math.round(amountTotal) / 100,
+    currency:
+      typeof session.currency === 'string' && session.currency !== ''
+        ? session.currency.toLowerCase()
+        : plan.currency,
+    transactionId:
+      normalizeStripeId(session.payment_intent) ||
+      normalizeStripeId(session.subscription) ||
+      session.id,
+    stripeSessionId: session.id,
+    paymentStatus: 'paid',
+    paidAt,
+    userId: user._id,
+    stripeEventId: event.id,
+  };
+}
+
+/** Only a matching student/tutor account may be upgraded by a payment. */
+export function getUpgradeUserFilter(userId, role) {
+  return { _id: userId, role };
 }
 
 /**
@@ -282,7 +342,7 @@ router.post(
       });
     }
 
-    const plan = PLAN_CATALOG[user.role];
+    const plan = getPlanForRole(user.role);
 
     if (!plan) {
       return res.status(403).json({
@@ -447,7 +507,7 @@ async function handleCheckoutPayment(event) {
     return;
   }
 
-  const plan = PLAN_CATALOG[user.role];
+  const plan = getPlanForRole(user.role);
 
   if (!plan) {
     console.warn('Stripe webhook ignored: unsupported user role');
@@ -463,34 +523,7 @@ async function handleCheckoutPayment(event) {
   );
 
   if (!existingPayment) {
-    const amountTotal = Number.isSafeInteger(session.amount_total)
-      ? session.amount_total
-      : plan.unitAmount;
-    const paidAt = Number.isFinite(event.created)
-      ? new Date(event.created * 1000)
-      : new Date();
-
-    const payment = {
-      userEmail: user.email ?? '',
-      userName: user.name ?? '',
-      userRole: user.role,
-      planName: plan.planName,
-      // Store the verified charge in major currency units (10 = $10.00).
-      amount: Math.round(amountTotal) / 100,
-      currency:
-        typeof session.currency === 'string' && session.currency !== ''
-          ? session.currency.toLowerCase()
-          : plan.currency,
-      transactionId:
-        normalizeStripeId(session.payment_intent) ||
-        normalizeStripeId(session.subscription) ||
-        session.id,
-      stripeSessionId: session.id,
-      paymentStatus: 'paid',
-      paidAt,
-      userId,
-      stripeEventId: event.id,
-    };
+    const payment = buildPaymentRecord(event, session, user, plan);
 
     try {
       await collection.insertOne(payment);
@@ -504,7 +537,7 @@ async function handleCheckoutPayment(event) {
 
   // Idempotent: repeated deliveries still leave the user on Pro.
   await usersCollection().updateOne(
-    { _id: userId, role: user.role },
+    getUpgradeUserFilter(userId, user.role),
     { $set: { plan: 'pro' } }
   );
 }
@@ -567,15 +600,12 @@ paymentWebhookRouter.post('/', async (req, res) => {
   }
 
   try {
-    if (PAYMENT_EVENTS.has(event.type)) {
+    const action = getWebhookAction(event);
+
+    if (action === 'payment') {
       await handleCheckoutPayment(event);
-    } else if (event.type === 'customer.subscription.deleted') {
-      await handleSubscriptionDowngrade(event.data.object);
-    } else if (
-      event.type === 'customer.subscription.updated' &&
-      DOWNGRADE_SUBSCRIPTION_STATUSES.has(event.data.object?.status)
-    ) {
-      await handleSubscriptionDowngrade(event.data.object);
+    } else if (action === 'downgrade') {
+      await handleSubscriptionDowngrade(event.data?.object);
     }
 
     return res.json({ received: true });
