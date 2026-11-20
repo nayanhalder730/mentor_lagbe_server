@@ -230,6 +230,48 @@ export function getPlanForRole(role) {
   return PLAN_CATALOG[role] ?? null;
 }
 
+/** Extracts the authenticated user id from Stripe session metadata. */
+export function getCheckoutIdentity(session) {
+  const raw = session?.metadata?.userId || session?.client_reference_id;
+  return toObjectId(raw);
+}
+
+/**
+ * Decides whether a verified checkout session represents a paid subscription.
+ * `no_payment_required` is deliberately not treated as a paid purchase: the
+ * catalog only sells positive-amount monthly plans and has no trial flow.
+ */
+export function getCheckoutPaymentDecision(session) {
+  if (!session || session.object !== 'checkout.session') return 'unrelated';
+  if (session.mode !== 'subscription') return 'unrelated';
+  if (session.status && session.status !== 'complete') return 'incomplete';
+
+  if (session.payment_status === 'paid') return 'upgrade';
+  if (session.payment_status === 'no_payment_required') {
+    return 'no_payment_required';
+  }
+  if (session.payment_status === 'unpaid') return 'unpaid';
+
+  return 'unknown_payment_status';
+}
+
+/** Builds a synthetic event for safe reconciliation of an existing session. */
+export function buildReconciliationEvent(session, now = Math.floor(Date.now() / 1000)) {
+  return {
+    id: `reconcile_${session.id}`,
+    type: 'checkout.session.completed',
+    created: now,
+    data: { object: session },
+  };
+}
+
+function logWebhook(eventType, sessionId, outcome, details = {}) {
+  console.info(
+    'stripe-webhook',
+    JSON.stringify({ eventType, sessionId, outcome, ...details })
+  );
+}
+
 /** Maps a verified Stripe event to the database action it should trigger. */
 export function getWebhookAction(event) {
   if (!event || typeof event !== 'object') return null;
@@ -472,53 +514,65 @@ router.get('/my', verifyToken, async (req, res) => {
 });
 
 /**
- * Handles a verified successful subscription checkout: records the payment
- * idempotently and upgrades the matching database user to Pro.
+ * Applies a verified paid subscription checkout to the database.
+ *
+ * Relevant events that cannot be fully processed now throw so the webhook can
+ * return a retryable 5xx. Unrelated or unpaid events are acknowledged with a
+ * structured log and never upgrade the user.
  */
-async function handleCheckoutPayment(event) {
-  const session = event.data.object;
+export async function applySuccessfulCheckoutUpgrade(event, deps = {}) {
+  const {
+    users = usersCollection(),
+    payments = paymentsCollection(),
+    ensureIndexes = ensurePaymentIndexes,
+    log = logWebhook,
+  } = deps;
 
-  if (!session || session.object !== 'checkout.session') {
+  const session = event?.data?.object;
+  const eventType = event?.type ?? 'unknown';
+  const sessionId = typeof session?.id === 'string' ? session.id : null;
+  const decision = getCheckoutPaymentDecision(session);
+
+  if (decision !== 'upgrade') {
+    log(eventType, sessionId, 'ignored', { reason: decision });
     return;
   }
 
-  if (session.mode !== 'subscription' || session.payment_status !== 'paid') {
-    // Asynchronous payment methods may complete before funds settle; the
-    // upgrade happens only after a paid event.
-    return;
+  const userId = getCheckoutIdentity(session);
+
+  if (!userId || !sessionId) {
+    log(eventType, sessionId, 'invalid');
+    throw new Error('Checkout session is missing required identity');
   }
 
-  const userId = toObjectId(
-    session.metadata?.userId || session.client_reference_id
-  );
+  log(eventType, sessionId, 'processing');
 
-  if (!userId || typeof session.id !== 'string') {
-    console.warn('Stripe webhook ignored: missing user or session id');
-    return;
-  }
-
-  const user = await usersCollection().findOne(
+  const user = await users.findOne(
     { _id: userId },
     { projection: { name: 1, email: 1, role: 1 } }
   );
 
   if (!user) {
-    console.warn('Stripe webhook ignored: user not found');
-    return;
+    log(eventType, sessionId, 'user_not_found');
+    throw new Error('Checkout user was not found');
   }
 
   const plan = getPlanForRole(user.role);
 
   if (!plan) {
-    console.warn('Stripe webhook ignored: unsupported user role');
-    return;
+    log(eventType, sessionId, 'role_not_eligible');
+    throw new Error('Checkout user role is not eligible for Pro');
   }
 
-  await ensurePaymentIndexes();
+  await ensureIndexes();
 
-  const collection = paymentsCollection();
-  const existingPayment = await collection.findOne(
-    { stripeEventId: event.id },
+  const existingPayment = await payments.findOne(
+    {
+      $or: [
+        { stripeEventId: event.id },
+        { stripeSessionId: sessionId },
+      ],
+    },
     { projection: { _id: 1 } }
   );
 
@@ -526,20 +580,36 @@ async function handleCheckoutPayment(event) {
     const payment = buildPaymentRecord(event, session, user, plan);
 
     try {
-      await collection.insertOne(payment);
+      await payments.insertOne(payment);
     } catch (error) {
-      // A concurrent delivery may have inserted the same event/session first.
+      // A concurrent delivery may have inserted this event/session first.
       if (error?.code !== 11000) {
+        log(eventType, sessionId, 'payment_record_failed');
         throw error;
       }
+
+      log(eventType, sessionId, 'payment_record_duplicate');
     }
   }
 
-  // Idempotent: repeated deliveries still leave the user on Pro.
-  await usersCollection().updateOne(
+  const result = await users.updateOne(
     getUpgradeUserFilter(userId, user.role),
     { $set: { plan: 'pro' } }
   );
+
+  log(eventType, sessionId, 'upgrade_attempted', {
+    matchedCount: result.matchedCount,
+    modifiedCount: result.modifiedCount,
+  });
+
+  if (result.matchedCount === 0) {
+    throw new Error('User upgrade matched no account');
+  }
+}
+
+/** Backwards-compatible name used by the webhook route. */
+export async function handleCheckoutPayment(event, deps) {
+  return applySuccessfulCheckoutUpgrade(event, deps);
 }
 
 /**

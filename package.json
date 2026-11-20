@@ -15,6 +15,7 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "seed:tuitions": "node scripts/seed-tuitions.js",
+    "reconcile:payment": "node scripts/reconcile-stripe-payment.js",
     "test": "node --test"
   },
   "dependencies": {

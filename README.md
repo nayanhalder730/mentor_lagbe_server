@@ -245,6 +245,21 @@ Saved Tuitions reuse the existing `user` document; no extra collection is create
 
 Live Stripe webhook delivery is not configured or verified in this repository.
 
+### Reconcile an already paid Checkout Session
+
+If a payment succeeded but the user is still on `free`, reconcile the existing Checkout Session instead of charging again:
+
+1. Stripe Dashboard → switch to the same mode used for the payment (Test or Live).
+2. Open **Payments** or **Checkout Sessions**, find the successful payment, and copy the Checkout Session ID beginning with `cs_`.
+   - The ID may also be present in the success URL as `?session_id=cs_...` or in the admin payment list as `stripeSessionId`.
+3. Run locally with the same `STRIPE_SECRET_KEY`, `MONGODB_URI` and `DB_NAME` used by the deployed API:
+
+```bash
+npm run reconcile:payment -- cs_TEST_SESSION_ID
+```
+
+The script retrieves the session from Stripe, verifies paid subscription status and the active subscription, checks the stored user, then applies the same idempotent Pro upgrade used by the webhook. It never creates a Checkout Session or charge and is safe to rerun.
+
 ---
 
 ## Seed Script
