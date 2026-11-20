@@ -139,6 +139,7 @@ The content update endpoint accepts only tuition content fields. The status endp
 | Method | Path | Access |
 | --- | --- | --- |
 | `POST` | `/api/applications` | Student |
+| `GET` | `/api/applications/check?tuitionId=<id>` | Student |
 | `GET` | `/api/applications/my` | Student |
 | `GET` | `/api/applications/tutor` | Tutor |
 | `PATCH` | `/api/applications/:id/status` | Tutor (owner) |
