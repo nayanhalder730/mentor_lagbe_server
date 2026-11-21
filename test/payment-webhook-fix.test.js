@@ -481,3 +481,26 @@ test('webhook still acknowledges unrelated event types', async () => {
     }
   );
 });
+
+test('payment bookkeeping failure must never prevent the verified plan upgrade', async () => {
+  const userId = new ObjectId();
+  const failingInsert = makeDeps({
+    userId,
+    insertError: new Error('payments collection unavailable'),
+  });
+
+  await assert.rejects(() =>
+    applySuccessfulCheckoutUpgrade(
+      makeEvent(makePaidSession(userId)),
+      failingInsert.deps
+    )
+  );
+
+  // The Stripe session and active subscription were already verified. A
+  // payments-write failure may be retried, but it must not leave the user Free.
+  assert.equal(
+    failingInsert.calls.update,
+    1,
+    'the user plan must be upgraded before payment-record bookkeeping'
+  );
+});

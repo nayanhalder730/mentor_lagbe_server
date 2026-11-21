@@ -631,6 +631,25 @@ export async function applySuccessfulCheckoutUpgrade(event, deps = {}) {
     throw new Error('Subscription identity does not match checkout identity');
   }
 
+  // The checkout session and active subscription have already been verified.
+  // Apply the plan upgrade FIRST: payment-record/index writes are bookkeeping
+  // and may be retried by Stripe, but a failure there must never leave a
+  // verified paying student/tutor on the Free plan (which also breaks the
+  // Free-limit UI and makes the dashboard look broken after payment).
+  const result = await users.updateOne(
+    getUpgradeUserFilter(userId, user.role),
+    { $set: { plan: 'pro' } }
+  );
+
+  log(eventType, sessionId, 'upgrade_attempted', {
+    matchedCount: result.matchedCount,
+    modifiedCount: result.modifiedCount,
+  });
+
+  if (result.matchedCount === 0) {
+    throw new Error('User upgrade matched no account');
+  }
+
   await ensureIndexes();
 
   const existingPayment = await payments.findOne(
@@ -657,20 +676,6 @@ export async function applySuccessfulCheckoutUpgrade(event, deps = {}) {
 
       log(eventType, sessionId, 'payment_record_duplicate');
     }
-  }
-
-  const result = await users.updateOne(
-    getUpgradeUserFilter(userId, user.role),
-    { $set: { plan: 'pro' } }
-  );
-
-  log(eventType, sessionId, 'upgrade_attempted', {
-    matchedCount: result.matchedCount,
-    modifiedCount: result.modifiedCount,
-  });
-
-  if (result.matchedCount === 0) {
-    throw new Error('User upgrade matched no account');
   }
 }
 
