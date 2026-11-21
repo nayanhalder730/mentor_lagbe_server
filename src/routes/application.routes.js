@@ -5,6 +5,7 @@ import {
   verifyToken,
   verifyStudent,
   verifyTutor,
+  verifyAdmin,
 } from '../middleware/auth.middleware.js';
 import {
   buildCancelApplicationFilter,
@@ -72,6 +73,7 @@ const APPLICATION_PROJECTION = {
 };
 
 const router = Router();
+export const adminApplicationRouter = Router();
 
 let applicationIndexPromise = null;
 let applicationSlotIndexPromise = null;
@@ -755,6 +757,69 @@ router.delete('/:id', verifyToken, verifyStudent, async (req, res) => {
   return res.status(outcome.status).json({
     success: outcome.success,
     message: outcome.message,
+  });
+});
+
+/**
+ * GET /api/admin/applications
+ * Admin-only listing of every application with status filtering and
+ * pagination. Uses the same safe projection as student/tutor views.
+ */
+adminApplicationRouter.get('/', verifyToken, verifyAdmin, async (req, res) => {
+  const page = parsePositiveInteger(req.query.page, 1);
+  const limit = parsePositiveInteger(req.query.limit, 20);
+
+  if (page === null) {
+    return res.status(400).json({
+      success: false,
+      message: 'page must be a positive integer',
+    });
+  }
+
+  if (limit === null || limit > 100) {
+    return res.status(400).json({
+      success: false,
+      message: 'limit must be a positive integer between 1 and 100',
+    });
+  }
+
+  const filter = {};
+
+  if (req.query.status !== undefined) {
+    if (
+      typeof req.query.status !== 'string' ||
+      !APPLICATION_STATUSES.has(req.query.status)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'status must be one of: pending, accepted, rejected',
+      });
+    }
+
+    filter.status = req.query.status;
+  }
+
+  const collection = applicationsCollection();
+  const total = await collection.countDocuments(filter);
+  const applications = await collection
+    .find(filter, { projection: APPLICATION_PROJECTION })
+    .sort({ appliedAt: -1, _id: -1 })
+    .skip((page - 1) * limit)
+    .limit(limit)
+    .toArray();
+
+  return res.json({
+    success: true,
+    message: 'Applications retrieved successfully',
+    data: {
+      applications: applications.map(toApplicationResponse),
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    },
   });
 });
 

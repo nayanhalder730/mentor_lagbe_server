@@ -77,6 +77,10 @@ function usersCollection() {
   return getDb().collection(USERS_COLLECTION);
 }
 
+function applicationsCollection() {
+  return getDb().collection('applications');
+}
+
 function toObjectId(id) {
   if (typeof id !== 'string' || !ObjectId.isValid(id)) {
     return null;
@@ -970,6 +974,55 @@ adminTuitionRouter.patch(
     });
   }
 );
+
+/**
+ * DELETE /api/admin/tuitions/:id
+ * Admin-only removal of inappropriate posts. Related applications and saved
+ * tuition references are cleaned up so no broken references remain. Payments
+ * are never touched.
+ */
+adminTuitionRouter.delete('/:id', verifyToken, verifyAdmin, async (req, res) => {
+  const tuitionId = toObjectId(req.params.id);
+
+  if (!tuitionId) {
+    return res.status(404).json({
+      success: false,
+      message: 'Tuition not found',
+    });
+  }
+
+  const existing = await tuitionsCollection().findOne(
+    { _id: tuitionId },
+    { projection: { _id: 1 } }
+  );
+
+  if (!existing) {
+    return res.status(404).json({
+      success: false,
+      message: 'Tuition not found',
+    });
+  }
+
+  const applications = await applicationsCollection().deleteMany({
+    tuitionId,
+  });
+
+  await usersCollection().updateMany(
+    { savedTuitionIds: tuitionId },
+    { $pull: { savedTuitionIds: tuitionId } }
+  );
+
+  await tuitionsCollection().deleteOne({ _id: tuitionId });
+
+  return res.json({
+    success: true,
+    message: 'Tuition deleted successfully',
+    data: {
+      id: tuitionId.toString(),
+      deletedApplications: applications.deletedCount,
+    },
+  });
+});
 
 /**
  * PATCH /api/tuitions/:id/status

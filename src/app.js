@@ -5,7 +5,9 @@ import userRoutes from './routes/user.routes.js';
 import tuitionRoutes, {
   adminTuitionRouter,
 } from './routes/tuition.routes.js';
-import applicationRoutes from './routes/application.routes.js';
+import applicationRoutes, {
+  adminApplicationRouter,
+} from './routes/application.routes.js';
 import paymentRoutes, {
   paymentWebhookRouter,
   adminPaymentRouter,
@@ -65,6 +67,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/tuitions', tuitionRoutes);
 app.use('/api/admin/tuitions', adminTuitionRouter);
 app.use('/api/applications', applicationRoutes);
+app.use('/api/admin/applications', adminApplicationRouter);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/admin/payments', adminPaymentRouter);
 app.use('/api/dashboard', dashboardRoutes);

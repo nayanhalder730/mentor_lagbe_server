@@ -15,14 +15,39 @@ export function parseTuitionId(value) {
   return new ObjectId(value);
 }
 
-/** `$ne` plus `$addToSet` makes duplicate saves impossible under concurrency. */
-export function buildSaveTuitionUpdate(userId, tuitionId) {
+export const FREE_STUDENT_SAVE_LIMIT = 5;
+
+/**
+ * `$ne` plus `$addToSet` makes duplicate saves impossible under concurrency.
+ * When maxSaved is provided, `$expr` also makes the Free-plan cap atomic so
+ * concurrent saves cannot push a Free student past the limit.
+ */
+export function buildSaveTuitionUpdate(userId, tuitionId, maxSaved = null) {
+  const filter = {
+    _id: userId,
+    savedTuitionIds: { $ne: tuitionId },
+  };
+
+  if (Number.isInteger(maxSaved)) {
+    filter.$expr = {
+      $lt: [{ $size: { $ifNull: ['$savedTuitionIds', []] } }, maxSaved],
+    };
+  }
+
   return {
-    filter: {
-      _id: userId,
-      savedTuitionIds: { $ne: tuitionId },
-    },
+    filter,
     update: { $addToSet: { savedTuitionIds: tuitionId } },
+  };
+}
+
+/** Clear, upgrade-oriented response when a Free student hits the cap. */
+export function buildSavedTuitionLimitResponse() {
+  return {
+    status: 403,
+    success: false,
+    code: 'FREE_BOOKMARK_LIMIT',
+    message:
+      'Free students can save at most 5 tuitions. Upgrade to Student Pro for unlimited bookmarks.',
   };
 }
 

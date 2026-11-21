@@ -97,6 +97,32 @@ export function buildRoleChangeUpdate(targetId, role, expectedRole) {
   };
 }
 
+/** Guard for destructive admin actions on user accounts. */
+export function describeUserDeleteConflict(
+  adminId,
+  targetId,
+  targetRole,
+  adminCount
+) {
+  if (isSelfRoleChange(adminId, targetId)) {
+    return {
+      status: 400,
+      success: false,
+      message: 'Admins cannot delete their own account',
+    };
+  }
+
+  if (targetRole === 'admin' && adminCount <= 1) {
+    return {
+      status: 409,
+      success: false,
+      message: 'Cannot delete the last admin account',
+    };
+  }
+
+  return null;
+}
+
 /** True when a role change would remove admin privileges from an account. */
 export function isAdminDemotion(currentRole, nextRole) {
   return currentRole === 'admin' && nextRole !== 'admin';

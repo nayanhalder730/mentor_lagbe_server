@@ -8,6 +8,7 @@ import {
   USER_ROLES,
   buildRoleChangeUpdate,
   describeRoleChangeConflict,
+  describeUserDeleteConflict,
   isAdminDemotion,
   isSelfRoleChange,
   toSafeProfile,
@@ -18,8 +19,10 @@ import {
   toTuitionResponse,
 } from '../routes/tuition.routes.js';
 import {
+  FREE_STUDENT_SAVE_LIMIT,
   buildRemoveTuitionUpdate,
   buildSaveTuitionUpdate,
+  buildSavedTuitionLimitResponse,
   buildSavedTuitionsFilter,
   getSavedTuitionIds,
   parseTuitionId,
@@ -258,6 +261,10 @@ function tuitionsCollection() {
   return getDb().collection('tuitions');
 }
 
+function applicationsCollection() {
+  return getDb().collection('applications');
+}
+
 /**
  * GET /api/users/me/saved-tuitions
  * Student-only list of their saved tuitions. Only approved, active tuitions
@@ -356,12 +363,43 @@ router.post('/me/saved-tuitions/:tuitionId', verifyToken, verifyStudent, async (
     });
   }
 
-  const { filter, update } = buildSaveTuitionUpdate(userId, tuitionId);
+  // Plan always comes from the database, never from the client. The atomic
+  // $expr cap makes the Free limit safe under concurrent requests.
+  const account = await usersCollection().findOne(
+    { _id: userId },
+    { projection: { plan: 1, savedTuitionIds: 1 } }
+  );
+
+  if (!account) {
+    return res.status(404).json({
+      success: false,
+      message: 'Student profile not found',
+    });
+  }
+
+  const isPro = account.plan === 'pro';
+  const maxSaved = isPro ? null : FREE_STUDENT_SAVE_LIMIT;
+
+  if (!isPro && getSavedTuitionIds(account).length >= FREE_STUDENT_SAVE_LIMIT) {
+    const limit = buildSavedTuitionLimitResponse();
+    return res.status(limit.status).json(limit);
+  }
+
+  const { filter, update } = buildSaveTuitionUpdate(
+    userId,
+    tuitionId,
+    maxSaved
+  );
   const result = await usersCollection().findOneAndUpdate(filter, update, {
     projection: { _id: 1 },
   });
 
   if (!result) {
+    if (!isPro && getSavedTuitionIds(account).length >= FREE_STUDENT_SAVE_LIMIT) {
+      const limit = buildSavedTuitionLimitResponse();
+      return res.status(limit.status).json(limit);
+    }
+
     return res.status(409).json({
       success: false,
       message: 'Tuition is already saved',
@@ -597,6 +635,97 @@ router.patch('/:id/role', verifyToken, verifyAdmin, async (req, res) => {
     success: true,
     message: 'User role updated successfully',
     data: toSafeProfile(updated),
+  });
+});
+
+/**
+ * DELETE /api/users/:id
+ * Admin-only account deletion. Self-deletion and deletion of the last admin
+ * are blocked. Related tuitions, their applications and saved-tuition
+ * references are cleaned up; payment history is intentionally preserved.
+ */
+router.delete('/:id', verifyToken, verifyAdmin, async (req, res) => {
+  const targetId = toObjectId(req.params.id);
+  const adminId = toObjectId(req.user.id);
+
+  if (!targetId || !adminId) {
+    return res.status(404).json({
+      success: false,
+      message: 'User not found',
+    });
+  }
+
+  const users = usersCollection();
+  const target = await users.findOne(
+    { _id: targetId },
+    { projection: { role: 1 } }
+  );
+
+  if (!target) {
+    return res.status(404).json({
+      success: false,
+      message: 'User not found',
+    });
+  }
+
+  const adminCount = await users.countDocuments({ role: 'admin' });
+  const conflict = describeUserDeleteConflict(
+    adminId,
+    targetId,
+    target.role,
+    adminCount
+  );
+
+  if (conflict) {
+    return res.status(conflict.status).json(conflict);
+  }
+
+  const ownedTuitions = await tuitionsCollection()
+    .find({ tutorId: targetId }, { projection: { _id: 1 } })
+    .toArray();
+  const tuitionIds = ownedTuitions.map((tuition) => tuition._id);
+  const tuitionIdStrings = new Set(tuitionIds.map((id) => id.toString()));
+
+  const applicationsFilter = {
+    $or: [{ studentId: targetId }],
+  };
+
+  if (tuitionIds.length > 0) {
+    applicationsFilter.$or.push({ tuitionId: { $in: tuitionIds } });
+  }
+
+  const applicationsResult = await applicationsCollection().deleteMany(
+    applicationsFilter
+  );
+
+  let tuitionsResult = { deletedCount: 0 };
+
+  if (tuitionIds.length > 0) {
+    tuitionsResult = await tuitionsCollection().deleteMany({
+      _id: { $in: tuitionIds },
+    });
+
+    // Remove dangling bookmark references from every remaining user.
+    await users.updateMany(
+      { savedTuitionIds: { $in: tuitionIds } },
+      { $pull: { savedTuitionIds: { $in: tuitionIds } } }
+    );
+  }
+
+  await users.deleteOne({ _id: targetId });
+
+  // Payments are intentionally left untouched: transaction history must
+  // survive account deletion.
+
+  return res.json({
+    success: true,
+    message: 'User deleted successfully',
+    data: {
+      id: targetId.toString(),
+      deletedTuitions: tuitionsResult.deletedCount,
+      deletedApplications: applicationsResult.deletedCount,
+      removedBookmarkReferences: tuitionIdStrings.size,
+    },
   });
 });
 
