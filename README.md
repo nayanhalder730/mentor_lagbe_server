@@ -17,14 +17,16 @@ Express REST API for **MentorLagbe**. It provides public tuition browsing, JWT-p
 
 | Item | Value |
 | --- | --- |
-| Admin credentials | **NOT PROVIDED** — no verified admin credentials exist in the repository. |
-| Tutor test credentials | **NOT PROVIDED** — no verified tutor credentials exist in the repository. |
+| Admin credentials | **OWNER TO PROVIDE BEFORE SUBMISSION** — no verified admin account exists in the repository. |
+| Tutor test credentials | **OWNER TO PROVIDE BEFORE SUBMISSION** — no verified tutor demo account exists in the repository. |
 | Live site URL (client) | https://mentor-lagbe-client-dun.vercel.app |
 | Live API URL (server) | https://mentor-lagbe-server-v7ji.vercel.app |
 | Client repository | https://github.com/nayanhalder730/mentor_lagbe_client |
 | Server repository | https://github.com/nayanhalder730/mentor_lagbe_server |
 
 Do not invent credentials or URLs for submission; add only verified values.
+
+**What the owner must supply:** a real admin email + password (a user in the shared Better Auth `user` collection with `role: "admin"`) and, optionally, a tutor demo email + password. Never publish a personal or production password.
 
 ---
 
@@ -298,18 +300,21 @@ For production, include the deployed client origin exactly, including scheme. If
 
 ---
 
-## Deployment (Render)
+## Deployment (Vercel)
 
-1. Create a Web Service from this repository.
-2. Runtime: Node.js. Build command: `npm install`. Start command: `npm start`.
-3. Add the environment variables from the table above in the Render dashboard.
-4. Set `PORT` to the port provided by the host if required.
-5. Set `BETTER_AUTH_URL` and `CLIENT_URL` to the deployed client origin(s).
-6. Point the client's `NEXT_PUBLIC_API_URL` to this service.
-7. Register `<API origin>/api/payments/webhook` in Stripe with the same signing secret.
-8. Verify `GET /api/health` after deployment.
+The repository ships a `vercel.json` rewrite and the live API is deployed at
+`https://mentor-lagbe-server-v7ji.vercel.app`.
 
-No Render URL is documented here; add the verified URL after deployment.
+1. Import this repository into Vercel (the included `vercel.json` routes requests to `api/index.js`).
+2. Add the environment variables from the table above in the Vercel project settings.
+3. Set `BETTER_AUTH_URL` and `CLIENT_URL` to the deployed client origin (`https://mentor-lagbe-client-dun.vercel.app`).
+4. Point the client's `NEXT_PUBLIC_API_URL` to `https://mentor-lagbe-server-v7ji.vercel.app`.
+5. Register `https://mentor-lagbe-server-v7ji.vercel.app/api/payments/webhook` in Stripe with the same signing secret.
+6. Verify `GET /api/health` after deployment.
+
+Webhook delivery and live Pro activation require Stripe Dashboard access and are
+not verified in this repository. Use `npm run reconcile:payment -- <session-id>`
+if a checkout completed while the webhook was not registered.
 
 ---
 
