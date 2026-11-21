@@ -262,11 +262,12 @@ export function isActiveSubscription(subscription) {
 export function subscriptionMatchesIdentity(subscription, userId) {
   if (!userId) return false;
 
+  // Checkout sets subscription_data.metadata.userId. A string mismatch (or a
+  // missing value) must never be treated as an identity match.
   const metadataUserId = subscription?.metadata?.userId;
 
-  return (
-    typeof metadataUserId !== 'string' || metadataUserId === userId.toHexString()
-  );
+  return typeof metadataUserId === 'string' &&
+    metadataUserId === userId.toHexString();
 }
 
 /**
@@ -678,11 +679,16 @@ export async function handleCheckoutPayment(event, deps) {
   return applySuccessfulCheckoutUpgrade(event, deps);
 }
 
+/** Atomic filter for downgrades: only real student/tutor accounts are affected. */
+export function getDowngradeUserFilter(userId) {
+  return { _id: userId, role: { $in: ['student', 'tutor'] } };
+}
+
 /**
  * Reverts a student/tutor to the free plan when their subscription is
  * canceled or otherwise no longer active.
  */
-async function handleSubscriptionDowngrade(subscription) {
+export async function handleSubscriptionDowngrade(subscription) {
   const userId = toObjectId(subscription?.metadata?.userId);
 
   if (!userId) {
@@ -690,7 +696,7 @@ async function handleSubscriptionDowngrade(subscription) {
   }
 
   await usersCollection().updateOne(
-    { _id: userId, role: { $in: ['student', 'tutor'] } },
+    getDowngradeUserFilter(userId),
     { $set: { plan: 'free' } }
   );
 }

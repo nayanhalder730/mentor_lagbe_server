@@ -7,7 +7,12 @@ export function errorHandler(err, req, res, next) {
     return next(err);
   }
 
-  console.error('Unhandled request error:', err);
+  // Log a sanitized message only. Full error objects can carry connection
+  // strings, request bodies or webhook payloads.
+  console.error(
+    'Unhandled request error:',
+    err instanceof Error ? err.message : 'unknown error'
+  );
 
   res.status(err.status || 500).json({
     success: false,

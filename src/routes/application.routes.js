@@ -35,6 +35,15 @@ const APPLICATIONS_COLLECTION = 'applications';
 const TUITIONS_COLLECTION = 'tuitions';
 const USERS_COLLECTION = 'user';
 
+/** Shared duplicate response for pre-checks and unique-index race paths. */
+export function buildDuplicateApplicationResponse() {
+  return {
+    status: 409,
+    success: false,
+    message: 'You have already applied to this tuition',
+  };
+}
+
 const APPLICATION_STATUSES = new Set(['pending', 'accepted', 'rejected']);
 const REVIEW_STATUSES = new Set(['accepted', 'rejected']);
 
@@ -356,10 +365,9 @@ router.post('/', verifyToken, verifyStudent, async (req, res) => {
     );
 
     if (duplicate) {
-      return res.status(409).json({
-        success: false,
-        message: 'You have already applied to this tuition',
-      });
+      return res
+        .status(buildDuplicateApplicationResponse().status)
+        .json(buildDuplicateApplicationResponse());
     }
 
     const slot = isPro ? undefined : chooseApplicationSlot(usedSlots, count);
@@ -397,15 +405,21 @@ router.post('/', verifyToken, verifyStudent, async (req, res) => {
       );
 
       if (duplicateAfterRace) {
-        return res.status(409).json({
-          success: false,
-          message: 'You have already applied to this tuition',
-        });
+        return res
+          .status(buildDuplicateApplicationResponse().status)
+          .json(buildDuplicateApplicationResponse());
+      }
+
+      // Pro Students have no slot, so a duplicate key here can only be the
+      // unique { studentId, tuitionId } index: a concurrent duplicate submit.
+      if (isPro) {
+        return res
+          .status(buildDuplicateApplicationResponse().status)
+          .json(buildDuplicateApplicationResponse());
       }
 
       // For Free Students a duplicate key here means another concurrent
       // request took the same slot. Recompute and try the remaining slot once.
-      if (isPro) throw error;
     }
   }
 

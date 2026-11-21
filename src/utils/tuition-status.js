@@ -35,6 +35,28 @@ export function getPublicTuitionFilter() {
 }
 
 /**
+ * Normalizes values returned by distinct() for public filter dropdowns.
+ * Only non-empty strings are exposed, deduplicated and sorted case-insensitively.
+ */
+export function normalizeFilterOptions(values) {
+  if (!Array.isArray(values)) return [];
+
+  const seen = new Set();
+
+  return values
+    .filter((value) => typeof value === 'string' && value.trim() !== '')
+    .map((value) => value.trim())
+    .filter((value) => {
+      const key = value.toLowerCase();
+
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' }));
+}
+
+/**
  * Moderation update applied by the admin approval endpoint.
  * `approvalStatus` is already validated by the route; the guard here prevents
  * accidental public exposure through an unsupported status.

@@ -14,6 +14,7 @@ import {
   getNewTuitionState,
   getPublicTuitionFilter,
   getTutorStatusMessage,
+  normalizeFilterOptions,
   validateTutorStatusBody,
 } from '../utils/tuition-status.js';
 
@@ -277,7 +278,7 @@ function validateTuitionBody(body, { requireAll }) {
 async function loadTutorProfile(userId) {
   return usersCollection().findOne(
     { _id: userId },
-    { projection: { name: 1, email: 1, plan: 1 } }
+    { projection: { name: 1, email: 1, plan: 1, image: 1, bio: 1 } }
   );
 }
 
@@ -465,6 +466,29 @@ router.get('/my', verifyToken, verifyTutor, async (req, res) => {
 });
 
 /**
+ * GET /api/tuitions/filters
+ * Public options for the Browse Tuitions dropdowns. Derived from the same
+ * approved+active filter used by the listing endpoint, so no unpublished
+ * tuition can influence the options. Registered before /:id.
+ */
+router.get('/filters', async (req, res) => {
+  const filter = getPublicTuitionFilter();
+  const [subjects, classLevels] = await Promise.all([
+    tuitionsCollection().distinct('subject', filter),
+    tuitionsCollection().distinct('classLevel', filter),
+  ]);
+
+  return res.json({
+    success: true,
+    message: 'Filter options retrieved successfully',
+    data: {
+      subjects: normalizeFilterOptions(subjects),
+      classLevels: normalizeFilterOptions(classLevels),
+    },
+  });
+});
+
+/**
  * GET /api/tuitions/:id
  * Public detail for one approved and active tuition.
  */
@@ -478,9 +502,11 @@ router.get('/:id', async (req, res) => {
     });
   }
 
+  // tutorId is needed only to resolve the public tutor profile; it is never
+  // included in the API response by toTuitionResponse().
   const tuition = await tuitionsCollection().findOne(
     { _id: tuitionId, approvalStatus: 'approved', isActive: true },
-    { projection: TUITION_PROJECTION }
+    { projection: { ...TUITION_PROJECTION, tutorId: 1 } }
   );
 
   if (!tuition) {
@@ -490,10 +516,18 @@ router.get('/:id', async (req, res) => {
     });
   }
 
+  const tutor = tuition.tutorId
+    ? await loadTutorProfile(tuition.tutorId)
+    : null;
+
   return res.json({
     success: true,
     message: 'Tuition retrieved successfully',
-    data: toTuitionResponse(tuition),
+    data: {
+      ...toTuitionResponse(tuition),
+      tutorImage: tutor?.image ?? null,
+      tutorBio: tutor?.bio ?? null,
+    },
   });
 });
 
