@@ -22,6 +22,14 @@ import {
   buildApplicationCheckFilter,
   parseCheckTuitionId,
 } from '../utils/application-check.js';
+import {
+  FREE_STUDENT_APPLICATION_LIMIT,
+  buildApplicationLimitResponse,
+  buildApplicationSlotIndexSpec,
+  chooseApplicationSlot,
+  isDuplicateKeyError,
+  isProPlan,
+} from '../utils/application-limit.js';
 
 const APPLICATIONS_COLLECTION = 'applications';
 const TUITIONS_COLLECTION = 'tuitions';
@@ -57,6 +65,7 @@ const APPLICATION_PROJECTION = {
 const router = Router();
 
 let applicationIndexPromise = null;
+let applicationSlotIndexPromise = null;
 
 function applicationsCollection() {
   return getDb().collection(APPLICATIONS_COLLECTION);
@@ -90,6 +99,42 @@ function ensureApplicationIndex() {
   }
 
   return applicationIndexPromise;
+}
+
+/** Unique sparse slot index prevents concurrent Free-limit bypass. */
+function ensureApplicationSlotIndex() {
+  if (!applicationSlotIndexPromise) {
+    const { keys, options } = buildApplicationSlotIndexSpec();
+
+    applicationSlotIndexPromise = applicationsCollection()
+      .createIndex(keys, options)
+      .catch((error) => {
+        applicationSlotIndexPromise = null;
+        throw error;
+      });
+  }
+
+  return applicationSlotIndexPromise;
+}
+
+async function getApplicationUsage(studentId) {
+  const collection = applicationsCollection();
+  const [count, occupiedSlots] = await Promise.all([
+    collection.countDocuments({ studentId }),
+    collection
+      .find(
+        { studentId, applicationSlot: { $exists: true } },
+        { projection: { applicationSlot: 1 } }
+      )
+      .toArray(),
+  ]);
+
+  return {
+    count,
+    usedSlots: occupiedSlots
+      .map((doc) => doc.applicationSlot)
+      .filter((slot) => Number.isInteger(slot)),
+  };
 }
 
 function toObjectId(id) {
@@ -245,7 +290,7 @@ router.post('/', verifyToken, verifyStudent, async (req, res) => {
 
   const student = await usersCollection().findOne(
     { _id: studentId },
-    { projection: { name: 1, email: 1 } }
+    { projection: { name: 1, email: 1, plan: 1 } }
   );
 
   if (!student) {
@@ -288,57 +333,91 @@ router.post('/', verifyToken, verifyStudent, async (req, res) => {
   }
 
   const collection = applicationsCollection();
+  const isPro = isProPlan(student.plan);
 
-  // The unique index is required for correctness; create it before the
-  // duplicate check so concurrent submissions cannot slip through.
-  await ensureApplicationIndex();
+  // Both indexes are needed: one for duplicate tuition submissions and one to
+  // make the Free Student slot limit safe under concurrent requests.
+  await Promise.all([ensureApplicationIndex(), ensureApplicationSlotIndex()]);
 
-  const duplicate = await collection.findOne(
-    { studentId, tuitionId },
-    { projection: { _id: 1 } }
-  );
+  let insertedDocument = null;
+  const maxAttempts = isPro ? 1 : FREE_STUDENT_APPLICATION_LIMIT + 1;
 
-  if (duplicate) {
-    return res.status(409).json({
-      success: false,
-      message: 'You have already applied to this tuition',
-    });
-  }
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const { count, usedSlots } = await getApplicationUsage(studentId);
 
-  const document = {
-    tuitionId: tuition._id,
-    tuitionTitle: tuition.title,
-    subject: tuition.subject,
-    monthlyFee: tuition.monthlyFee,
-    tutorEmail: tuition.tutorEmail,
-    studentName: student.name ?? '',
-    studentEmail: student.email ?? '',
-    studentPhone,
-    preferredSchedule,
-    studentNote,
-    status: 'pending',
-    appliedAt: new Date(),
-    studentId,
-    tutorId: tuition.tutorId,
-  };
+    if (!isPro && count >= FREE_STUDENT_APPLICATION_LIMIT) {
+      const limitResponse = buildApplicationLimitResponse();
+      return res.status(limitResponse.status).json(limitResponse);
+    }
 
-  try {
-    await collection.insertOne(document);
-  } catch (error) {
-    if (error?.code === 11000) {
+    const duplicate = await collection.findOne(
+      { studentId, tuitionId },
+      { projection: { _id: 1 } }
+    );
+
+    if (duplicate) {
       return res.status(409).json({
         success: false,
         message: 'You have already applied to this tuition',
       });
     }
 
-    throw error;
+    const slot = isPro ? undefined : chooseApplicationSlot(usedSlots, count);
+
+    const document = {
+      tuitionId: tuition._id,
+      tuitionTitle: tuition.title,
+      subject: tuition.subject,
+      monthlyFee: tuition.monthlyFee,
+      tutorEmail: tuition.tutorEmail,
+      studentName: student.name ?? '',
+      studentEmail: student.email ?? '',
+      studentPhone,
+      preferredSchedule,
+      studentNote,
+      status: 'pending',
+      appliedAt: new Date(),
+      studentId,
+      tutorId: tuition.tutorId,
+      ...(slot === undefined ? {} : { applicationSlot: slot }),
+    };
+
+    try {
+      await collection.insertOne(document);
+      insertedDocument = document;
+      break;
+    } catch (error) {
+      if (!isDuplicateKeyError(error)) {
+        throw error;
+      }
+
+      const duplicateAfterRace = await collection.findOne(
+        { studentId, tuitionId },
+        { projection: { _id: 1 } }
+      );
+
+      if (duplicateAfterRace) {
+        return res.status(409).json({
+          success: false,
+          message: 'You have already applied to this tuition',
+        });
+      }
+
+      // For Free Students a duplicate key here means another concurrent
+      // request took the same slot. Recompute and try the remaining slot once.
+      if (isPro) throw error;
+    }
+  }
+
+  if (!insertedDocument) {
+    const limitResponse = buildApplicationLimitResponse();
+    return res.status(limitResponse.status).json(limitResponse);
   }
 
   return res.status(201).json({
     success: true,
     message: 'Application submitted successfully',
-    data: toApplicationResponse(document),
+    data: toApplicationResponse(insertedDocument),
   });
 });
 
