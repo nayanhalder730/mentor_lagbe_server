@@ -61,7 +61,9 @@ async function main() {
     );
   }
 
-  await applySuccessfulCheckoutUpgrade(buildReconciliationEvent(session));
+  await applySuccessfulCheckoutUpgrade(buildReconciliationEvent(session), {
+    verifySubscription: async () => subscription,
+  });
 
   console.log(
     `Reconciliation complete for Checkout Session ${sessionId}: Pro plan is active.`

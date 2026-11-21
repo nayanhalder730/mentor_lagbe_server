@@ -2,8 +2,7 @@
 
 Express REST API for **MentorLagbe**. It provides public tuition browsing, JWT-protected student/tutor/admin workflows, Better Auth JWKS verification, admin moderation, dashboard statistics and Stripe subscription handling.
 
-> Server live URL: **NOT PROVIDED — no verified live API URL exists in the repository.**
-> Add the real deployed URL only after deployment is confirmed.
+> Server live URL: https://mentor-lagbe-server-v7ji.vercel.app
 
 ---
 
@@ -20,8 +19,8 @@ Express REST API for **MentorLagbe**. It provides public tuition browsing, JWT-p
 | --- | --- |
 | Admin credentials | **NOT PROVIDED** — no verified admin credentials exist in the repository. |
 | Tutor test credentials | **NOT PROVIDED** — no verified tutor credentials exist in the repository. |
-| Live site URL (client) | **NOT PROVIDED** — no verified deployment URL exists in the repository. |
-| Live API URL (server) | **NOT PROVIDED** — no verified deployment URL exists in the repository. |
+| Live site URL (client) | https://mentor-lagbe-client-dun.vercel.app |
+| Live API URL (server) | https://mentor-lagbe-server-v7ji.vercel.app |
 | Client repository | https://github.com/nayanhalder730/mentor_lagbe_client |
 | Server repository | https://github.com/nayanhalder730/mentor_lagbe_server |
 

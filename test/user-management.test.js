@@ -13,6 +13,7 @@ import {
   SELF_UPDATABLE_FIELDS,
   buildRoleChangeUpdate,
   describeRoleChangeConflict,
+  isAdminDemotion,
   isSelfRoleChange,
   toSafeProfile,
   validateRoleChangeBody,
@@ -58,12 +59,15 @@ test('public self-update route cannot change role or other protected fields', ()
   }
 });
 
-test('role change accepts only student or tutor', () => {
+test('role change accepts student, tutor and admin', () => {
   assert.deepEqual(validateRoleChangeBody({ role: 'student' }), {
     value: 'student',
   });
   assert.deepEqual(validateRoleChangeBody({ role: 'tutor' }), {
     value: 'tutor',
+  });
+  assert.deepEqual(validateRoleChangeBody({ role: 'admin' }), {
+    value: 'admin',
   });
 
   for (const body of [
@@ -71,7 +75,6 @@ test('role change accepts only student or tutor', () => {
     undefined,
     [],
     {},
-    { role: 'admin' },
     { role: 'ADMIN' },
     { role: 1 },
     { role: 'student', plan: 'pro' },
@@ -80,10 +83,10 @@ test('role change accepts only student or tutor', () => {
     assert.ok(validateRoleChangeBody(body).error);
   }
 
-  assert.deepEqual(validateRoleChangeBody({ role: 'admin' }), {
-    error: 'role must be either student or tutor',
+  assert.deepEqual(validateRoleChangeBody({ role: 'owner' }), {
+    error: 'role must be one of: student, tutor, admin',
   });
-  assert.equal(ASSIGNABLE_ROLES.has('admin'), false);
+  assert.equal(ASSIGNABLE_ROLES.has('admin'), true);
 });
 
 test('self-demotion is prevented with ObjectId-safe comparison', () => {
@@ -96,6 +99,14 @@ test('self-demotion is prevented with ObjectId-safe comparison', () => {
   );
   assert.equal(isSelfRoleChange(adminId, new ObjectId()), false);
   assert.equal(isSelfRoleChange(null, adminId), false);
+});
+
+test('admin demotion can be detected for last-admin protection', () => {
+  assert.equal(isAdminDemotion('admin', 'student'), true);
+  assert.equal(isAdminDemotion('admin', 'tutor'), true);
+  assert.equal(isAdminDemotion('admin', 'admin'), false);
+  assert.equal(isAdminDemotion('student', 'admin'), false);
+  assert.equal(isAdminDemotion('tutor', 'student'), false);
 });
 
 test('safe projection and profile never expose authentication fields', () => {
@@ -163,13 +174,21 @@ test('safe projection and profile never expose authentication fields', () => {
   assert.equal(fallback.plan, 'free');
 });
 
-test('role update query is atomic and excludes protected fields', () => {
+test('role update query is atomic and uses compare-and-set', () => {
   const targetId = new ObjectId();
-  const { filter, update } = buildRoleChangeUpdate(targetId, 'tutor');
+  const { filter, update } = buildRoleChangeUpdate(
+    targetId,
+    'tutor',
+    'student'
+  );
 
   assert.deepEqual(Object.keys(filter).sort(), ['_id', 'role']);
   assert.equal(String(filter._id), String(targetId));
-  assert.deepEqual(filter.role, { $in: ['student', 'tutor'] });
+  assert.equal(filter.role, 'student');
+
+  const withoutExpected = buildRoleChangeUpdate(targetId, 'admin');
+
+  assert.deepEqual(Object.keys(withoutExpected.filter), ['_id']);
 
   assert.deepEqual(Object.keys(update.$set).sort(), ['role', 'updatedAt']);
   assert.equal(update.$set.role, 'tutor');
@@ -185,11 +204,11 @@ test('role change conflicts are safe and do not reveal other users', () => {
     message: 'User not found',
   });
 
-  const adminConflict = describeRoleChangeConflict({ role: 'admin' });
+  const unchanged = describeRoleChangeConflict({ role: 'admin' });
 
-  assert.equal(adminConflict.status, 409);
-  assert.equal(adminConflict.success, false);
-  assert.match(adminConflict.message, /Admin accounts/);
+  assert.equal(unchanged.status, 409);
+  assert.equal(unchanged.success, false);
+  assert.match(unchanged.message, /could not be updated/);
 
   const genericConflict = describeRoleChangeConflict({ role: 'student' });
 

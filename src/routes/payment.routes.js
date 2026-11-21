@@ -236,6 +236,39 @@ export function getCheckoutIdentity(session) {
   return toObjectId(raw);
 }
 
+/** Extracts the Stripe Subscription ID from a Checkout Session. */
+export function getCheckoutSubscriptionId(session) {
+  const value = session?.subscription;
+
+  if (typeof value === 'string' && value.startsWith('sub_')) return value;
+  if (
+    value &&
+    typeof value === 'object' &&
+    typeof value.id === 'string' &&
+    value.id.startsWith('sub_')
+  ) {
+    return value.id;
+  }
+
+  return null;
+}
+
+/** Only an active subscription grants Pro for these paid monthly plans. */
+export function isActiveSubscription(subscription) {
+  return subscription?.status === 'active';
+}
+
+/** Compares the subscription metadata user to the checkout identity. */
+export function subscriptionMatchesIdentity(subscription, userId) {
+  if (!userId) return false;
+
+  const metadataUserId = subscription?.metadata?.userId;
+
+  return (
+    typeof metadataUserId !== 'string' || metadataUserId === userId.toHexString()
+  );
+}
+
 /**
  * Decides whether a verified checkout session represents a paid subscription.
  * `no_payment_required` is deliberately not treated as a paid purchase: the
@@ -526,6 +559,7 @@ export async function applySuccessfulCheckoutUpgrade(event, deps = {}) {
     payments = paymentsCollection(),
     ensureIndexes = ensurePaymentIndexes,
     log = logWebhook,
+    verifySubscription,
   } = deps;
 
   const session = event?.data?.object;
@@ -557,11 +591,43 @@ export async function applySuccessfulCheckoutUpgrade(event, deps = {}) {
     throw new Error('Checkout user was not found');
   }
 
+  if (
+    typeof session.metadata?.userRole === 'string' &&
+    session.metadata.userRole !== user.role
+  ) {
+    log(eventType, sessionId, 'role_mismatch');
+    throw new Error('Checkout role does not match the account role');
+  }
+
   const plan = getPlanForRole(user.role);
 
   if (!plan) {
     log(eventType, sessionId, 'role_not_eligible');
     throw new Error('Checkout user role is not eligible for Pro');
+  }
+
+  const subscriptionId = getCheckoutSubscriptionId(session);
+
+  if (!subscriptionId) {
+    log(eventType, sessionId, 'subscription_missing');
+    throw new Error('Checkout session has no subscription');
+  }
+
+  if (typeof verifySubscription !== 'function') {
+    log(eventType, sessionId, 'subscription_verifier_missing');
+    throw new Error('Subscription verification is unavailable');
+  }
+
+  const subscription = await verifySubscription(subscriptionId);
+
+  if (!isActiveSubscription(subscription)) {
+    log(eventType, sessionId, 'subscription_not_active');
+    throw new Error('Subscription is not active');
+  }
+
+  if (!subscriptionMatchesIdentity(subscription, userId)) {
+    log(eventType, sessionId, 'subscription_identity_mismatch');
+    throw new Error('Subscription identity does not match checkout identity');
   }
 
   await ensureIndexes();
@@ -630,6 +696,19 @@ async function handleSubscriptionDowngrade(subscription) {
 }
 
 /**
+ * Retrieves a subscription from Stripe for webhook verification.
+ */
+async function retrieveStripeSubscription(app, subscriptionId) {
+  const stripe = getStripeClient(app);
+
+  if (!stripe) {
+    throw new Error('Payment service is not configured');
+  }
+
+  return stripe.subscriptions.retrieve(subscriptionId);
+}
+
+/**
  * POST /api/payments/webhook
  * Mounted with express.raw() before the global JSON parser so the Stripe
  * signature can be verified against the exact raw payload.
@@ -673,7 +752,10 @@ paymentWebhookRouter.post('/', async (req, res) => {
     const action = getWebhookAction(event);
 
     if (action === 'payment') {
-      await handleCheckoutPayment(event);
+      await handleCheckoutPayment(event, {
+        verifySubscription: (subscriptionId) =>
+          retrieveStripeSubscription(req.app, subscriptionId),
+      });
     } else if (action === 'downgrade') {
       await handleSubscriptionDowngrade(event.data?.object);
     }

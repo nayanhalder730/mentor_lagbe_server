@@ -12,7 +12,7 @@ export const USER_ROLES = new Set(['student', 'tutor', 'admin']);
 export const USER_PLANS = new Set(['free', 'pro']);
 
 /** Roles an admin may assign through the role-change endpoint. */
-export const ASSIGNABLE_ROLES = new Set(['student', 'tutor']);
+export const ASSIGNABLE_ROLES = new Set(USER_ROLES);
 
 /** Fields a user may change on their own profile. `role` is never included. */
 export const SELF_UPDATABLE_FIELDS = new Set([
@@ -52,7 +52,7 @@ export function toSafeProfile(document) {
   };
 }
 
-/** Only `{ role: 'student' | 'tutor' }` is accepted. */
+/** Only `{ role: 'student' | 'tutor' | 'admin' }` is accepted. */
 export function validateRoleChangeBody(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return { error: 'Request body must be a JSON object' };
@@ -63,7 +63,7 @@ export function validateRoleChangeBody(body) {
   }
 
   if (typeof body.role !== 'string' || !ASSIGNABLE_ROLES.has(body.role)) {
-    return { error: 'role must be either student or tutor' };
+    return { error: 'role must be one of: student, tutor, admin' };
   }
 
   return { value: body.role };
@@ -79,14 +79,14 @@ export function isSelfRoleChange(adminId, targetId) {
 }
 
 /**
- * Atomic role update. Only non-admin accounts can match, so an admin cannot
- * be demoted through this endpoint even by another admin.
+ * Atomic role update. The optional expected role makes the update a
+ * compare-and-set so a concurrent role change cannot be overwritten.
  */
-export function buildRoleChangeUpdate(targetId, role) {
+export function buildRoleChangeUpdate(targetId, role, expectedRole) {
   return {
     filter: {
       _id: targetId,
-      role: { $in: [...ASSIGNABLE_ROLES] },
+      ...(expectedRole ? { role: expectedRole } : {}),
     },
     update: {
       $set: {
@@ -95,6 +95,11 @@ export function buildRoleChangeUpdate(targetId, role) {
       },
     },
   };
+}
+
+/** True when a role change would remove admin privileges from an account. */
+export function isAdminDemotion(currentRole, nextRole) {
+  return currentRole === 'admin' && nextRole !== 'admin';
 }
 
 /** Response when the atomic update did not match a document. */

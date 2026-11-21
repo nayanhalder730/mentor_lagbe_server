@@ -8,7 +8,11 @@ import {
   buildReconciliationEvent,
   getCheckoutIdentity,
   getCheckoutPaymentDecision,
+  getCheckoutSubscriptionId,
+  isActiveSubscription,
+  subscriptionMatchesIdentity,
 } from '../src/routes/payment.routes.js';
+import { toSafeProfile } from '../src/utils/user-management.js';
 
 function makePaidSession(userId = new ObjectId()) {
   return {
@@ -25,6 +29,7 @@ function makePaidSession(userId = new ObjectId()) {
       planName: 'Student Pro',
     },
     client_reference_id: userId.toHexString(),
+    subscription: 'sub_test_1',
     payment_intent: { id: 'pi_test_1' },
   };
 }
@@ -39,12 +44,28 @@ function makeEvent(session, type = 'checkout.session.completed') {
 }
 
 function makeDeps(options = {}) {
+  const resolvedUserId = options.userId ?? new ObjectId();
   const {
-    user = { _id: options.userId ?? new ObjectId(), name: 'Test', email: 'test@example.test', role: 'student' },
+    user = options.user === undefined
+      ? {
+          _id: resolvedUserId,
+          name: 'Test',
+          email: 'test@example.test',
+          role: 'student',
+        }
+      : options.user,
     existingPayment = null,
     updateResult = { matchedCount: 1, modifiedCount: true },
     insertError = null,
     updateError = null,
+    subscription = options.subscription === undefined
+      ? {
+          id: 'sub_test_1',
+          status: 'active',
+          metadata: { userId: resolvedUserId.toHexString() },
+        }
+      : options.subscription,
+    verifySubscription = options.verifySubscription ?? (async () => subscription),
   } = options;
 
   const calls = { findUser: 0, findPayment: 0, insert: 0, update: 0 };
@@ -74,6 +95,7 @@ function makeDeps(options = {}) {
       },
     },
     async ensureIndexes() {},
+    verifySubscription,
     log(...args) {
       logs.push(args);
     },
@@ -252,6 +274,11 @@ test('webhook returns 500 for a relevant event that cannot be processed', async 
             return makeEvent(session);
           },
         },
+        subscriptions: {
+          async retrieve() {
+            return { id: 'sub_test_1', status: 'active', metadata: { userId: new ObjectId().toHexString() } };
+          },
+        },
       };
 
       const res = makeRes();
@@ -274,6 +301,146 @@ test('webhook returns 500 for a relevant event that cannot be processed', async 
   );
 });
 
+test('inactive or missing subscription never upgrades the user', async () => {
+  const userId = new ObjectId();
+
+  const inactive = makeDeps({
+    userId,
+    subscription: {
+      id: 'sub_test_1',
+      status: 'canceled',
+      metadata: { userId: userId.toHexString() },
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      applySuccessfulCheckoutUpgrade(
+        makeEvent(makePaidSession(userId)),
+        inactive.deps
+      ),
+    /Subscription is not active/
+  );
+  assert.equal(inactive.calls.update, 0);
+
+  const sessionWithoutSubscription = makePaidSession(userId);
+  delete sessionWithoutSubscription.subscription;
+
+  const missing = makeDeps({ userId });
+
+  await assert.rejects(
+    () =>
+      applySuccessfulCheckoutUpgrade(
+        makeEvent(sessionWithoutSubscription),
+        missing.deps
+      ),
+    /no subscription/
+  );
+  assert.equal(missing.calls.update, 0);
+});
+
+test('role and subscription identity mismatches never upgrade the user', async () => {
+  const userId = new ObjectId();
+
+  const roleMismatchSession = makePaidSession(userId);
+  roleMismatchSession.metadata.userRole = 'admin';
+
+  const roleDeps = makeDeps({ userId });
+
+  await assert.rejects(
+    () =>
+      applySuccessfulCheckoutUpgrade(
+        makeEvent(roleMismatchSession),
+        roleDeps.deps
+      ),
+    /role does not match/
+  );
+  assert.equal(roleDeps.calls.update, 0);
+
+  const identityDeps = makeDeps({
+    userId,
+    subscription: {
+      id: 'sub_test_1',
+      status: 'active',
+      metadata: { userId: new ObjectId().toHexString() },
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      applySuccessfulCheckoutUpgrade(
+        makeEvent(makePaidSession(userId)),
+        identityDeps.deps
+      ),
+    /identity does not match/
+  );
+  assert.equal(identityDeps.calls.update, 0);
+
+  assert.equal(
+    getCheckoutSubscriptionId(makePaidSession(userId)),
+    'sub_test_1'
+  );
+  assert.equal(isActiveSubscription({ status: 'active' }), true);
+  assert.equal(isActiveSubscription({ status: 'canceled' }), false);
+  assert.equal(
+    subscriptionMatchesIdentity(
+      { metadata: { userId: userId.toHexString() } },
+      userId
+    ),
+    true
+  );
+});
+
+test('persisted Pro plan survives repeated webhook delivery', async () => {
+  const userId = new ObjectId();
+  const stored = {
+    _id: userId,
+    name: 'Test',
+    email: 'test@example.test',
+    role: 'student',
+    plan: 'free',
+  };
+
+  const deps = {
+    users: {
+      async findOne() {
+        return { ...stored };
+      },
+      async updateOne(filter, update) {
+        assert.equal(String(filter._id), String(userId));
+        Object.assign(stored, update.$set);
+        return { matchedCount: 1, modifiedCount: true };
+      },
+    },
+    payments: {
+      async findOne() {
+        return null;
+      },
+      async insertOne() {
+        return { insertedId: new ObjectId() };
+      },
+    },
+    async ensureIndexes() {},
+    async verifySubscription() {
+      return {
+        id: 'sub_test_1',
+        status: 'active',
+        metadata: { userId: userId.toHexString() },
+      };
+    },
+    log() {},
+  };
+
+  const event = makeEvent(makePaidSession(userId));
+
+  await applySuccessfulCheckoutUpgrade(event, deps);
+  assert.equal(stored.plan, 'pro');
+
+  await applySuccessfulCheckoutUpgrade(event, deps);
+  assert.equal(stored.plan, 'pro');
+  assert.equal(toSafeProfile({ ...stored, createdAt: null }).plan, 'pro');
+});
+
 test('webhook still acknowledges unrelated event types', async () => {
   await withEnv(
     {
@@ -285,6 +452,11 @@ test('webhook still acknowledges unrelated event types', async () => {
         webhooks: {
           constructEvent() {
             return { id: 'evt_unrelated', type: 'invoice.created', data: { object: {} } };
+          },
+        },
+        subscriptions: {
+          async retrieve() {
+            return { id: 'sub_test_1', status: 'active', metadata: {} };
           },
         },
       };

@@ -8,6 +8,7 @@ import {
   USER_ROLES,
   buildRoleChangeUpdate,
   describeRoleChangeConflict,
+  isAdminDemotion,
   isSelfRoleChange,
   toSafeProfile,
   validateRoleChangeBody,
@@ -511,8 +512,8 @@ router.get('/', verifyToken, verifyAdmin, async (req, res) => {
 
 /**
  * PATCH /api/users/:id/role
- * Admin-only role changes for student/tutor accounts. Admin accounts are not
- * modifiable here, and an admin cannot change their own role.
+ * Admin-only role changes for student, tutor and admin accounts. An admin
+ * cannot change their own role, and the last admin cannot be demoted.
  */
 router.patch('/:id/role', verifyToken, verifyAdmin, async (req, res) => {
   const validated = validateRoleChangeBody(req.body);
@@ -541,9 +542,37 @@ router.patch('/:id/role', verifyToken, verifyAdmin, async (req, res) => {
     });
   }
 
-  const { filter, update } = buildRoleChangeUpdate(targetId, validated.value);
-
   const collection = usersCollection();
+
+  const target = await collection.findOne(
+    { _id: targetId },
+    { projection: { role: 1 } }
+  );
+
+  if (!target) {
+    return res.status(404).json({
+      success: false,
+      message: 'User not found',
+    });
+  }
+
+  if (isAdminDemotion(target.role, validated.value)) {
+    const adminCount = await collection.countDocuments({ role: 'admin' });
+
+    if (adminCount <= 1) {
+      return res.status(409).json({
+        success: false,
+        message: 'Cannot demote the last admin account',
+      });
+    }
+  }
+
+  const { filter, update } = buildRoleChangeUpdate(
+    targetId,
+    validated.value,
+    target.role
+  );
+
   const updated = await collection.findOneAndUpdate(filter, update, {
     returnDocument: 'after',
     projection: SAFE_USER_PROJECTION,
