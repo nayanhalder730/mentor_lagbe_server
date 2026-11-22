@@ -282,6 +282,99 @@ Do not run this script against production data.
 
 ---
 
+## MongoDB Index Migration (deployment prerequisite)
+
+The Free Tutor limit in `src/utils/tuition-limit.js` now uses a **partial** unique index:
+
+```js
+{
+  keys: { tutorId: 1, tutorSlot: 1 },
+  options: {
+    unique: true,
+    partialFilterExpression: { tutorSlot: { $type: 'number' } },
+    name: 'uniq_tutor_tuition_slot'
+  }
+}
+```
+
+Existing databases still have the older **sparse** index with the same name. A compound sparse index includes every post because `tutorId` is always present and stores `null` for a Pro post's missing `tutorSlot`, so two Pro posts by the same tutor collide. The new definition cannot be created in place while the old one exists (`IndexOptionsConflict`, code 85), and `ensureTutorSlotIndex()` never drops indexes.
+
+Run this once in `mongosh` against the configured database during a maintenance window, then deploy the code change in the same window:
+
+```js
+use mentor_lagbe // or the exact configured database name
+db.tuitions.getIndexes() // expect sparse: true on uniq_tutor_tuition_slot
+db.tuitions.aggregate([
+  { $match: { tutorSlot: { $type: 'number' } } },
+  { $group: { _id: { tutorId: '$tutorId', tutorSlot: '$tutorSlot' }, count: { $sum: 1 } } },
+  { $match: { count: { $gt: 1 } } }
+]).toArray() // MUST be empty before recreating the unique index
+db.tuitions.dropIndex('uniq_tutor_tuition_slot')
+db.tuitions.createIndex(
+  { tutorId: 1, tutorSlot: 1 },
+  {
+    name: 'uniq_tutor_tuition_slot',
+    unique: true,
+    partialFilterExpression: { tutorSlot: { $type: 'number' } }
+  }
+)
+db.tuitions.getIndexes() // verify partialFilterExpression and no sparse flag
+```
+
+Until the index and the code are in sync, Free Tutor posting and Pro Tutor posting can fail. No migration has been applied by this repository.
+
+### Applications index migration (Pro Student unlimited applications)
+
+`src/utils/application-limit.js` now uses a **partial** unique index with a **new name**, so it can be built while the legacy index still exists:
+
+```js
+{
+  keys: { studentId: 1, applicationSlot: 1 },
+  options: {
+    unique: true,
+    partialFilterExpression: { applicationSlot: { $type: 'number' } },
+    name: 'uniq_student_application_slot_v2'
+  }
+}
+```
+
+The legacy `uniq_student_application_slot` is sparse, so it still indexes every application with `studentId` and stores `null` for a Pro student's missing `applicationSlot`. Two Pro applications by the same student therefore keep colliding until that old index is dropped.
+
+Migration order matters: the old deployed code calls `createIndex()` with the old name on every `POST /api/applications`, so it would **recreate** the legacy index if it were dropped too early. Build the new index first, deploy the new code everywhere, and only then drop the old index:
+
+```js
+use mentor_lagbe // or the exact configured database name
+db.applications.getIndexes() // expect uniq_student_application_slot with sparse: true
+
+// Pre-flight: must be empty before creating a unique index
+db.applications.aggregate([
+  { $match: { applicationSlot: { $type: 'number' } } },
+  { $group: { _id: { studentId: '$studentId', applicationSlot: '$applicationSlot' }, count: { $sum: 1 } } },
+  { $match: { count: { $gt: 1 } } }
+]).toArray()
+
+// 1. Build the new partial index (safe alongside the legacy index)
+db.applications.createIndex(
+  { studentId: 1, applicationSlot: 1 },
+  {
+    name: 'uniq_student_application_slot_v2',
+    unique: true,
+    partialFilterExpression: { applicationSlot: { $type: 'number' } }
+  }
+)
+db.applications.getIndexes() // verify v2 exists with partialFilterExpression
+
+// 2. Deploy the updated server code to every instance.
+
+// 3. ONLY AFTER the new code is live everywhere, remove the legacy index.
+db.applications.dropIndex('uniq_student_application_slot')
+db.applications.getIndexes() // verify only v2 remains
+```
+
+Until step 3 is complete, Pro students are still limited to one application in production even though the code is fixed. No migration has been applied by this repository.
+
+---
+
 ## Testing
 
 ```bash
@@ -324,6 +417,8 @@ if a checkout completed while the webhook was not registered.
 - [ ] `BETTER_AUTH_URL` and `CLIENT_URL` use the deployed HTTPS origins.
 - [ ] `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` are set from Stripe **live** mode only when ready.
 - [ ] Stripe webhook endpoint is registered and signature verification succeeds.
+- [ ] The `uniq_tutor_tuition_slot` index has been migrated to the partial definition above (deployment prerequisite).
+- [ ] `uniq_student_application_slot_v2` was built, the new code was deployed, and the legacy `uniq_student_application_slot` was then dropped (deployment prerequisite).
 - [ ] CORS allows only trusted client origins.
 - [ ] No seed script has been run against production.
 - [ ] Health endpoint returns `status: "ok"`.

@@ -25,11 +25,9 @@ import {
   parseCheckTuitionId,
 } from '../utils/application-check.js';
 import {
-  FREE_STUDENT_APPLICATION_LIMIT,
   buildApplicationLimitResponse,
   buildApplicationSlotIndexSpec,
-  chooseApplicationSlot,
-  isDuplicateKeyError,
+  insertApplicationWithLimit,
   isProPlan,
 } from '../utils/application-limit.js';
 
@@ -127,26 +125,6 @@ function ensureApplicationSlotIndex() {
   }
 
   return applicationSlotIndexPromise;
-}
-
-async function getApplicationUsage(studentId) {
-  const collection = applicationsCollection();
-  const [count, occupiedSlots] = await Promise.all([
-    collection.countDocuments({ studentId }),
-    collection
-      .find(
-        { studentId, applicationSlot: { $exists: true } },
-        { projection: { applicationSlot: 1 } }
-      )
-      .toArray(),
-  ]);
-
-  return {
-    count,
-    usedSlots: occupiedSlots
-      .map((doc) => doc.applicationSlot)
-      .filter((slot) => Number.isInteger(slot)),
-  };
 }
 
 function toObjectId(id) {
@@ -351,31 +329,12 @@ router.post('/', verifyToken, verifyStudent, async (req, res) => {
   // make the Free Student slot limit safe under concurrent requests.
   await Promise.all([ensureApplicationIndex(), ensureApplicationSlotIndex()]);
 
-  let insertedDocument = null;
-  const maxAttempts = isPro ? 1 : FREE_STUDENT_APPLICATION_LIMIT + 1;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const { count, usedSlots } = await getApplicationUsage(studentId);
-
-    if (!isPro && count >= FREE_STUDENT_APPLICATION_LIMIT) {
-      const limitResponse = buildApplicationLimitResponse();
-      return res.status(limitResponse.status).json(limitResponse);
-    }
-
-    const duplicate = await collection.findOne(
-      { studentId, tuitionId },
-      { projection: { _id: 1 } }
-    );
-
-    if (duplicate) {
-      return res
-        .status(buildDuplicateApplicationResponse().status)
-        .json(buildDuplicateApplicationResponse());
-    }
-
-    const slot = isPro ? undefined : chooseApplicationSlot(usedSlots, count);
-
-    const document = {
+  const outcome = await insertApplicationWithLimit({
+    applications: collection,
+    studentId,
+    tuitionId,
+    isPro,
+    document: {
       tuitionId: tuition._id,
       tuitionTitle: tuition.title,
       subject: tuition.subject,
@@ -390,43 +349,15 @@ router.post('/', verifyToken, verifyStudent, async (req, res) => {
       appliedAt: new Date(),
       studentId,
       tutorId: tuition.tutorId,
-      ...(slot === undefined ? {} : { applicationSlot: slot }),
-    };
+    },
+  });
 
-    try {
-      await collection.insertOne(document);
-      insertedDocument = document;
-      break;
-    } catch (error) {
-      if (!isDuplicateKeyError(error)) {
-        throw error;
-      }
-
-      const duplicateAfterRace = await collection.findOne(
-        { studentId, tuitionId },
-        { projection: { _id: 1 } }
-      );
-
-      if (duplicateAfterRace) {
-        return res
-          .status(buildDuplicateApplicationResponse().status)
-          .json(buildDuplicateApplicationResponse());
-      }
-
-      // Pro Students have no slot, so a duplicate key here can only be the
-      // unique { studentId, tuitionId } index: a concurrent duplicate submit.
-      if (isPro) {
-        return res
-          .status(buildDuplicateApplicationResponse().status)
-          .json(buildDuplicateApplicationResponse());
-      }
-
-      // For Free Students a duplicate key here means another concurrent
-      // request took the same slot. Recompute and try the remaining slot once.
-    }
+  if (outcome.duplicate) {
+    const duplicate = buildDuplicateApplicationResponse();
+    return res.status(duplicate.status).json(duplicate);
   }
 
-  if (!insertedDocument) {
+  if (outcome.limited) {
     const limitResponse = buildApplicationLimitResponse();
     return res.status(limitResponse.status).json(limitResponse);
   }
@@ -434,7 +365,7 @@ router.post('/', verifyToken, verifyStudent, async (req, res) => {
   return res.status(201).json({
     success: true,
     message: 'Application submitted successfully',
-    data: toApplicationResponse(insertedDocument),
+    data: toApplicationResponse(outcome.inserted),
   });
 });
 
@@ -508,8 +439,12 @@ router.get('/my', verifyToken, verifyStudent, async (req, res) => {
   const filter = buildStudentApplicationsFilter(studentId);
   const collection = applicationsCollection();
   const total = await collection.countDocuments(filter);
+  // `tutorId` is needed only for the batched tutor-name lookup below. It is
+  // stripped again by toApplicationResponse(), so it is never exposed.
   const applications = await collection
-    .find(filter, { projection: APPLICATION_PROJECTION })
+    .find(filter, {
+      projection: { ...APPLICATION_PROJECTION, tutorId: 1 },
+    })
     .sort({ appliedAt: -1, _id: -1 })
     .skip((page - 1) * limit)
     .limit(limit)

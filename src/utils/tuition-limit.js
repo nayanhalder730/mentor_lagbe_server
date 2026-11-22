@@ -1,23 +1,30 @@
 /**
  * Free Tutor tuition-post limit rules.
  *
- * The limit is enforced with a unique sparse index on
- * `{ tutorId, tutorSlot }`. Free posts occupy slot 1 or 2; Pro posts do not
- * carry a slot at all, so the sparse index never constrains them. Concurrent
- * requests race for the same slot and the loser retries the remaining slot
- * instead of both passing a count-then-insert check.
+ * The limit is enforced with a unique PARTIAL index on
+ * `{ tutorId, tutorSlot }`. Free posts occupy numeric slot 1 or 2; Pro posts
+ * have no slot (or a legacy null slot), so the partial filter keeps them out
+ * of the index entirely. A compound *sparse* index is not equivalent: it
+ * indexes any document that has `tutorId`, storing `null` for a missing slot,
+ * which makes multiple Pro posts for one tutor collide on `{ tutorId, null }`.
+ * Concurrent requests race for the same slot and the loser retries the
+ * remaining slot instead of both passing a count-then-insert check.
  */
 
 export const FREE_PLAN_POST_LIMIT = 2;
 export const TUITION_LIMIT_CODE = 'FREE_TUITION_LIMIT';
 
-/** Unique sparse index: Pro posts have no slot and are unconstrained. */
+/**
+ * Unique partial index: only posts carrying a numeric `tutorSlot` are indexed.
+ * `$type: 'number'` (not `$exists: true`) also excludes legacy documents that
+ * explicitly store `tutorSlot: null`.
+ */
 export function buildTutorSlotIndexSpec() {
   return {
     keys: { tutorId: 1, tutorSlot: 1 },
     options: {
       unique: true,
-      sparse: true,
+      partialFilterExpression: { tutorSlot: { $type: 'number' } },
       name: 'uniq_tutor_tuition_slot',
     },
   };
@@ -29,9 +36,11 @@ export function chooseTutorSlot(usedSlots) {
     if (!usedSlots.has(slot)) return slot;
   }
 
-  // The fallback value cannot match a real slot; the unique index rejects the
-  // insert so the caller can retry or return the limit response.
-  return FREE_PLAN_POST_LIMIT + 1;
+  // Both real slots are taken. Return an ALREADY-OCCUPIED slot so the unique
+  // index rejects the insert and the caller's next iteration hits the count
+  // check, which returns the limit response. A value outside {1, 2} would be
+  // a valid distinct key in the partial index and would allow a third post.
+  return 1;
 }
 
 export function buildTuitionLimitResponse() {

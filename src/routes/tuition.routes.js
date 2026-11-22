@@ -126,9 +126,14 @@ export function toAdminTuitionResponse(document) {
 let tutorSlotIndexPromise = null;
 
 /**
- * Creates the unique `{ tutorId, tutorSlot }` index once per process. The
- * promise is cached so concurrent creates share the same index build; a
- * failure resets the cache so a later request can retry.
+ * Creates the partial unique `{ tutorId, tutorSlot }` index once per process.
+ * Only numeric slots are indexed, so Pro posts (no slot / legacy null slot)
+ * cannot collide. The promise is cached so concurrent creates share the same
+ * index build; a failure resets the cache so a later request can retry.
+ *
+ * Note: existing deployments still have the old sparse index under the same
+ * name. It must be removed and recreated with the partial filter manually
+ * before this definition can be created; this function never drops indexes.
  */
 function ensureTutorSlotIndex() {
   if (!tutorSlotIndexPromise) {
