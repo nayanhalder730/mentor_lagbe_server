@@ -21,6 +21,7 @@ import {
 } from '../utils/application-tutor.js';
 import {
   buildApplicationCheckFilter,
+  buildApplicationCheckResponse,
   parseCheckTuitionId,
 } from '../utils/application-check.js';
 import {
@@ -463,13 +464,13 @@ router.get('/check', verifyToken, verifyStudent, async (req, res) => {
 
   const existing = await applicationsCollection().findOne(
     buildApplicationCheckFilter(studentId, tuitionId),
-    { projection: { _id: 1 } }
+    { projection: { _id: 0, status: 1 } }
   );
 
   return res.json({
     success: true,
     message: 'Application check completed',
-    data: { hasApplied: Boolean(existing) },
+    data: buildApplicationCheckResponse(existing),
   });
 });
 

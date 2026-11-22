@@ -11,6 +11,7 @@ import {
 } from '../src/middleware/auth.middleware.js';
 import {
   buildApplicationCheckFilter,
+  buildApplicationCheckResponse,
   parseCheckTuitionId,
 } from '../src/utils/application-check.js';
 
@@ -61,4 +62,23 @@ test('a different student id can never match the same application', () => {
   const filter = buildApplicationCheckFilter(new ObjectId(), tuitionId);
 
   assert.notEqual(String(filter.studentId), String(studentId));
+});
+
+test('check response exposes only existence and the safe review status', () => {
+  assert.deepEqual(buildApplicationCheckResponse(null), {
+    hasApplied: false,
+    status: null,
+  });
+
+  for (const status of ['pending', 'accepted', 'rejected']) {
+    assert.deepEqual(
+      buildApplicationCheckResponse({
+        status,
+        studentId,
+        tuitionId,
+        studentEmail: 'private@example.test',
+      }),
+      { hasApplied: true, status }
+    );
+  }
 });
