@@ -7,7 +7,9 @@ import {
   normalizeFilterOptions,
 } from '../src/utils/tuition-status.js';
 import {
+  ADMIN_TUITION_PROJECTION,
   TUITION_PROJECTION,
+  toAdminTuitionResponse,
   toTuitionResponse,
 } from '../src/routes/tuition.routes.js';
 import { buildDuplicateApplicationResponse } from '../src/routes/application.routes.js';
@@ -23,10 +25,12 @@ test('public tuition filter requires both approval and active status', () => {
   });
 });
 
-test('tuition projection never exposes the internal tutorId', () => {
+test('public tuition projection never exposes private tutor fields', () => {
   assert.equal(TUITION_PROJECTION.tutorId, undefined);
+  assert.equal(TUITION_PROJECTION.tutorEmail, undefined);
+  assert.equal(ADMIN_TUITION_PROJECTION.tutorEmail, 1);
 
-  const response = toTuitionResponse({
+  const document = {
     _id: new ObjectId(),
     title: 'Math',
     subject: 'Mathematics',
@@ -41,9 +45,14 @@ test('tuition projection never exposes the internal tutorId', () => {
     tutorId: new ObjectId(),
     approvalStatus: 'approved',
     isActive: true,
-  });
+  };
+
+  const response = toTuitionResponse(document);
+  const adminResponse = toAdminTuitionResponse(document);
 
   assert.equal('tutorId' in response, false);
+  assert.equal('tutorEmail' in response, false);
+  assert.equal(adminResponse.tutorEmail, 'tutor@example.test');
 });
 
 test('filter options are trimmed, deduplicated and sorted', () => {

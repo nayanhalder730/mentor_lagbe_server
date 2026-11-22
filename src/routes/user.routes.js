@@ -27,6 +27,10 @@ import {
   getSavedTuitionIds,
   parseTuitionId,
 } from '../utils/saved-tuitions.js';
+import {
+  buildAdminLockIndexSpec,
+  withAdminLock,
+} from '../utils/admin-guard.js';
 
 const router = Router();
 
@@ -36,6 +40,35 @@ const USERS_COLLECTION = 'user';
 
 function usersCollection() {
   return getDb().collection(USERS_COLLECTION);
+}
+
+let adminLockIndexPromise = null;
+
+/**
+ * Creates the unique admin-mutation lock index once per process. Concurrent
+ * role-change/deletion requests share the same build; a failure resets the
+ * cache so a later request can retry.
+ */
+function ensureAdminLockIndex() {
+  if (!adminLockIndexPromise) {
+    const { keys, options } = buildAdminLockIndexSpec();
+
+    adminLockIndexPromise = usersCollection()
+      .createIndex(keys, options)
+      .catch((error) => {
+        adminLockIndexPromise = null;
+        throw error;
+      });
+  }
+
+  return adminLockIndexPromise;
+}
+
+function adminLockContentionResponse(res) {
+  return res.status(409).json({
+    success: false,
+    message: 'Another admin change is in progress. Please try again.',
+  });
 }
 
 function toObjectId(id) {
@@ -580,62 +613,78 @@ router.patch('/:id/role', verifyToken, verifyAdmin, async (req, res) => {
     });
   }
 
-  const collection = usersCollection();
+  await ensureAdminLockIndex();
 
-  const target = await collection.findOne(
-    { _id: targetId },
-    { projection: { role: 1 } }
-  );
+  const outcome = await withAdminLock(usersCollection(), adminId, async () => {
+    const collection = usersCollection();
 
-  if (!target) {
-    return res.status(404).json({
-      success: false,
-      message: 'User not found',
-    });
-  }
-
-  if (isAdminDemotion(target.role, validated.value)) {
-    const adminCount = await collection.countDocuments({ role: 'admin' });
-
-    if (adminCount <= 1) {
-      return res.status(409).json({
-        success: false,
-        message: 'Cannot demote the last admin account',
-      });
-    }
-  }
-
-  const { filter, update } = buildRoleChangeUpdate(
-    targetId,
-    validated.value,
-    target.role
-  );
-
-  const updated = await collection.findOneAndUpdate(filter, update, {
-    returnDocument: 'after',
-    projection: SAFE_USER_PROJECTION,
-  });
-
-  if (!updated) {
-    // Diagnostic read only after the atomic update failed. It never returns
-    // another user's profile fields.
-    const current = await collection.findOne(
+    const target = await collection.findOne(
       { _id: targetId },
       { projection: { role: 1 } }
     );
-    const conflict = describeRoleChangeConflict(current);
 
-    return res.status(conflict.status).json({
-      success: false,
-      message: conflict.message,
+    if (!target) {
+      return {
+        status: 404,
+        body: { success: false, message: 'User not found' },
+      };
+    }
+
+    if (isAdminDemotion(target.role, validated.value)) {
+      const adminCount = await collection.countDocuments({ role: 'admin' });
+
+      if (adminCount <= 1) {
+        return {
+          status: 409,
+          body: {
+            success: false,
+            message: 'Cannot demote the last admin account',
+          },
+        };
+      }
+    }
+
+    const { filter, update } = buildRoleChangeUpdate(
+      targetId,
+      validated.value,
+      target.role
+    );
+
+    const updated = await collection.findOneAndUpdate(filter, update, {
+      returnDocument: 'after',
+      projection: SAFE_USER_PROJECTION,
     });
+
+    if (!updated) {
+      // Diagnostic read only after the atomic update failed. It never returns
+      // another user's profile fields.
+      const current = await collection.findOne(
+        { _id: targetId },
+        { projection: { role: 1 } }
+      );
+      const conflict = describeRoleChangeConflict(current);
+
+      return {
+        status: conflict.status,
+        body: { success: false, message: conflict.message },
+      };
+    }
+
+    return {
+      status: 200,
+      body: {
+        success: true,
+        message: 'User role updated successfully',
+        data: toSafeProfile(updated),
+      },
+    };
+  });
+
+  if (!outcome.acquired) {
+    return adminLockContentionResponse(res);
   }
 
-  return res.json({
-    success: true,
-    message: 'User role updated successfully',
-    data: toSafeProfile(updated),
-  });
+  return res.status(outcome.value.status).json(outcome.value.body);
 });
 
 /**
@@ -655,78 +704,109 @@ router.delete('/:id', verifyToken, verifyAdmin, async (req, res) => {
     });
   }
 
-  const users = usersCollection();
-  const target = await users.findOne(
-    { _id: targetId },
-    { projection: { role: 1 } }
-  );
+  await ensureAdminLockIndex();
 
-  if (!target) {
-    return res.status(404).json({
-      success: false,
-      message: 'User not found',
-    });
-  }
-
-  const adminCount = await users.countDocuments({ role: 'admin' });
-  const conflict = describeUserDeleteConflict(
-    adminId,
-    targetId,
-    target.role,
-    adminCount
-  );
-
-  if (conflict) {
-    return res.status(conflict.status).json(conflict);
-  }
-
-  const ownedTuitions = await tuitionsCollection()
-    .find({ tutorId: targetId }, { projection: { _id: 1 } })
-    .toArray();
-  const tuitionIds = ownedTuitions.map((tuition) => tuition._id);
-  const tuitionIdStrings = new Set(tuitionIds.map((id) => id.toString()));
-
-  const applicationsFilter = {
-    $or: [{ studentId: targetId }],
-  };
-
-  if (tuitionIds.length > 0) {
-    applicationsFilter.$or.push({ tuitionId: { $in: tuitionIds } });
-  }
-
-  const applicationsResult = await applicationsCollection().deleteMany(
-    applicationsFilter
-  );
-
-  let tuitionsResult = { deletedCount: 0 };
-
-  if (tuitionIds.length > 0) {
-    tuitionsResult = await tuitionsCollection().deleteMany({
-      _id: { $in: tuitionIds },
-    });
-
-    // Remove dangling bookmark references from every remaining user.
-    await users.updateMany(
-      { savedTuitionIds: { $in: tuitionIds } },
-      { $pull: { savedTuitionIds: { $in: tuitionIds } } }
+  const outcome = await withAdminLock(usersCollection(), adminId, async () => {
+    const users = usersCollection();
+    const target = await users.findOne(
+      { _id: targetId },
+      { projection: { role: 1 } }
     );
+
+    if (!target) {
+      return {
+        status: 404,
+        body: { success: false, message: 'User not found' },
+      };
+    }
+
+    const adminCount = await users.countDocuments({ role: 'admin' });
+    const conflict = describeUserDeleteConflict(
+      adminId,
+      targetId,
+      target.role,
+      adminCount
+    );
+
+    if (conflict) {
+      return { status: conflict.status, body: conflict };
+    }
+
+    const ownedTuitions = await tuitionsCollection()
+      .find({ tutorId: targetId }, { projection: { _id: 1 } })
+      .toArray();
+    const tuitionIds = ownedTuitions.map((tuition) => tuition._id);
+    const tuitionIdStrings = new Set(tuitionIds.map((id) => id.toString()));
+
+    const applicationsFilter = {
+      $or: [{ studentId: targetId }],
+    };
+
+    if (tuitionIds.length > 0) {
+      applicationsFilter.$or.push({ tuitionId: { $in: tuitionIds } });
+    }
+
+    const applicationsResult = await applicationsCollection().deleteMany(
+      applicationsFilter
+    );
+
+    let tuitionsResult = { deletedCount: 0 };
+
+    if (tuitionIds.length > 0) {
+      tuitionsResult = await tuitionsCollection().deleteMany({
+        _id: { $in: tuitionIds },
+      });
+
+      // Remove dangling bookmark references from every remaining user.
+      await users.updateMany(
+        { savedTuitionIds: { $in: tuitionIds } },
+        { $pull: { savedTuitionIds: { $in: tuitionIds } } }
+      );
+    }
+
+    // Compare-and-set on the role: if the account was promoted or otherwise
+    // changed outside this serialized section, do not delete it blindly.
+    const deleteFilter = { _id: targetId };
+
+    if (target.role !== undefined) {
+      deleteFilter.role = target.role;
+    }
+
+    const deletedUser = await users.deleteOne(deleteFilter);
+
+    if (deletedUser.deletedCount === 0) {
+      return {
+        status: 409,
+        body: {
+          success: false,
+          message: 'User role changed. Please try again.',
+        },
+      };
+    }
+
+    // Payments are intentionally left untouched: transaction history must
+    // survive account deletion.
+
+    return {
+      status: 200,
+      body: {
+        success: true,
+        message: 'User deleted successfully',
+        data: {
+          id: targetId.toString(),
+          deletedTuitions: tuitionsResult.deletedCount,
+          deletedApplications: applicationsResult.deletedCount,
+          removedBookmarkReferences: tuitionIdStrings.size,
+        },
+      },
+    };
+  });
+
+  if (!outcome.acquired) {
+    return adminLockContentionResponse(res);
   }
 
-  await users.deleteOne({ _id: targetId });
-
-  // Payments are intentionally left untouched: transaction history must
-  // survive account deletion.
-
-  return res.json({
-    success: true,
-    message: 'User deleted successfully',
-    data: {
-      id: targetId.toString(),
-      deletedTuitions: tuitionsResult.deletedCount,
-      deletedApplications: applicationsResult.deletedCount,
-      removedBookmarkReferences: tuitionIdStrings.size,
-    },
-  });
+  return res.status(outcome.value.status).json(outcome.value.body);
 });
 
 export default router;

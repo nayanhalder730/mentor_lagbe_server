@@ -17,10 +17,15 @@ import {
   normalizeFilterOptions,
   validateTutorStatusBody,
 } from '../utils/tuition-status.js';
+import {
+  buildTutorSlotIndexSpec,
+  buildTuitionLimitResponse,
+  insertTuitionWithLimit,
+} from '../utils/tuition-limit.js';
+import { deleteTuitionWithReferences } from '../utils/tuition-deletion.js';
 
 const TUITIONS_COLLECTION = 'tuitions';
 const USERS_COLLECTION = 'user';
-const FREE_PLAN_POST_LIMIT = 2;
 
 const MODES = new Set(['Online', 'Offline']);
 const APPROVAL_STATUSES = new Set(['pending', 'approved', 'rejected']);
@@ -48,7 +53,8 @@ const REQUIRED_FIELDS = [
   'description',
 ];
 
-// Public/user-facing shape. Internal `tutorId` is never exposed.
+// Public/user-facing shape. Internal `tutorId` and private `tutorEmail` are
+// never exposed. Admin routes use ADMIN_TUITION_PROJECTION below.
 export const TUITION_PROJECTION = {
   title: 1,
   subject: 1,
@@ -60,10 +66,15 @@ export const TUITION_PROJECTION = {
   bannerImage: 1,
   description: 1,
   tutorName: 1,
-  tutorEmail: 1,
   approvalStatus: 1,
   isActive: 1,
   createdAt: 1,
+};
+
+/** Admin-only shape: moderation screens may see the tutor's contact email. */
+export const ADMIN_TUITION_PROJECTION = {
+  ...TUITION_PROJECTION,
+  tutorEmail: 1,
 };
 
 const router = Router();
@@ -75,10 +86,6 @@ function tuitionsCollection() {
 
 function usersCollection() {
   return getDb().collection(USERS_COLLECTION);
-}
-
-function applicationsCollection() {
-  return getDb().collection('applications');
 }
 
 function toObjectId(id) {
@@ -102,11 +109,40 @@ export function toTuitionResponse(document) {
     bannerImage: document.bannerImage ?? null,
     description: document.description,
     tutorName: document.tutorName,
-    tutorEmail: document.tutorEmail,
     approvalStatus: document.approvalStatus,
     isActive: document.isActive,
     createdAt: document.createdAt ?? null,
   };
+}
+
+/** Admin-only response that additionally exposes the tutor contact email. */
+export function toAdminTuitionResponse(document) {
+  return {
+    ...toTuitionResponse(document),
+    tutorEmail: document.tutorEmail ?? null,
+  };
+}
+
+let tutorSlotIndexPromise = null;
+
+/**
+ * Creates the unique `{ tutorId, tutorSlot }` index once per process. The
+ * promise is cached so concurrent creates share the same index build; a
+ * failure resets the cache so a later request can retry.
+ */
+function ensureTutorSlotIndex() {
+  if (!tutorSlotIndexPromise) {
+    const { keys, options } = buildTutorSlotIndexSpec();
+
+    tutorSlotIndexPromise = tuitionsCollection()
+      .createIndex(keys, options)
+      .catch((error) => {
+        tutorSlotIndexPromise = null;
+        throw error;
+      });
+  }
+
+  return tutorSlotIndexPromise;
 }
 
 function escapeRegex(value) {
@@ -569,18 +605,10 @@ router.post('/', verifyToken, verifyTutor, async (req, res) => {
 
   // Plan is read from trusted database data, never the request body or the
   // (possibly stale) JWT claim.
-  if (tutor.plan !== 'pro') {
-    const existingCount = await tuitionsCollection().countDocuments({
-      tutorId: userId,
-    });
+  const isPro = tutor.plan === 'pro';
 
-    if (existingCount >= FREE_PLAN_POST_LIMIT) {
-      return res.status(403).json({
-        success: false,
-        message:
-          'Free tutors can post at most 2 tuitions. Upgrade to Pro for unlimited posts.',
-      });
-    }
+  if (!isPro) {
+    await ensureTutorSlotIndex();
   }
 
   const document = {
@@ -593,12 +621,22 @@ router.post('/', verifyToken, verifyTutor, async (req, res) => {
     createdAt: new Date(),
   };
 
-  await tuitionsCollection().insertOne(document);
+  const outcome = await insertTuitionWithLimit({
+    tuitions: tuitionsCollection(),
+    tutorId: userId,
+    isPro,
+    document,
+  });
+
+  if (outcome.limited) {
+    const limit = buildTuitionLimitResponse();
+    return res.status(limit.status).json(limit);
+  }
 
   return res.status(201).json({
     success: true,
     message: 'Tuition created and submitted for approval',
-    data: toTuitionResponse(document),
+    data: toTuitionResponse(outcome.inserted),
   });
 });
 
@@ -688,7 +726,9 @@ router.patch('/:id', verifyToken, verifyTutor, async (req, res) => {
 
 /**
  * DELETE /api/tuitions/:id
- * Only the owning tutor may delete their own tuition.
+ * Only the owning tutor may delete their own tuition. Related applications
+ * and saved-tuition references are removed in the same operation so no
+ * dangling ids remain. Payment history is never touched.
  */
 router.delete('/:id', verifyToken, verifyTutor, async (req, res) => {
   const tuitionId = toObjectId(req.params.id);
@@ -701,12 +741,11 @@ router.delete('/:id', verifyToken, verifyTutor, async (req, res) => {
     });
   }
 
-  const result = await tuitionsCollection().deleteOne({
-    _id: tuitionId,
+  const deleted = await deleteTuitionWithReferences(tuitionId, {
     tutorId: userId,
   });
 
-  if (result.deletedCount === 0) {
+  if (!deleted) {
     return res.status(404).json({
       success: false,
       message: 'Tuition not found',
@@ -716,6 +755,7 @@ router.delete('/:id', verifyToken, verifyTutor, async (req, res) => {
   return res.json({
     success: true,
     message: 'Tuition deleted successfully',
+    data: deleted,
   });
 });
 
@@ -789,7 +829,7 @@ adminTuitionRouter.get('/', verifyToken, verifyAdmin, async (req, res) => {
   const collection = tuitionsCollection();
   const total = await collection.countDocuments(filter);
   const tuitions = await collection
-    .find(filter, { projection: TUITION_PROJECTION })
+    .find(filter, { projection: ADMIN_TUITION_PROJECTION })
     .sort({ createdAt: -1, _id: -1 })
     .skip((page - 1) * limit)
     .limit(limit)
@@ -799,7 +839,7 @@ adminTuitionRouter.get('/', verifyToken, verifyAdmin, async (req, res) => {
     success: true,
     message: 'Tuitions retrieved successfully',
     data: {
-      tuitions: tuitions.map(toTuitionResponse),
+      tuitions: tuitions.map(toAdminTuitionResponse),
       pagination: {
         page,
         limit,
@@ -887,13 +927,13 @@ adminTuitionRouter.patch(
     const updated = await collection.findOneAndUpdate(
       { _id: tuitionId },
       { $set: getApprovalUpdate(body.approvalStatus) },
-      { returnDocument: 'after', projection: TUITION_PROJECTION }
+      { returnDocument: 'after', projection: ADMIN_TUITION_PROJECTION }
     );
 
     return res.json({
       success: true,
       message: approved ? 'Tuition approved' : 'Tuition rejected',
-      data: toTuitionResponse(updated),
+      data: toAdminTuitionResponse(updated),
     });
   }
 );
@@ -962,7 +1002,7 @@ adminTuitionRouter.patch(
     const updated = await collection.findOneAndUpdate(
       { _id: tuitionId },
       { $set: { isActive: body.isActive } },
-      { returnDocument: 'after', projection: TUITION_PROJECTION }
+      { returnDocument: 'after', projection: ADMIN_TUITION_PROJECTION }
     );
 
     return res.json({
@@ -970,7 +1010,7 @@ adminTuitionRouter.patch(
       message: body.isActive
         ? 'Tuition activated'
         : 'Tuition deactivated',
-      data: toTuitionResponse(updated),
+      data: toAdminTuitionResponse(updated),
     });
   }
 );
@@ -991,36 +1031,19 @@ adminTuitionRouter.delete('/:id', verifyToken, verifyAdmin, async (req, res) => 
     });
   }
 
-  const existing = await tuitionsCollection().findOne(
-    { _id: tuitionId },
-    { projection: { _id: 1 } }
-  );
+  const deleted = await deleteTuitionWithReferences(tuitionId);
 
-  if (!existing) {
+  if (!deleted) {
     return res.status(404).json({
       success: false,
       message: 'Tuition not found',
     });
   }
 
-  const applications = await applicationsCollection().deleteMany({
-    tuitionId,
-  });
-
-  await usersCollection().updateMany(
-    { savedTuitionIds: tuitionId },
-    { $pull: { savedTuitionIds: tuitionId } }
-  );
-
-  await tuitionsCollection().deleteOne({ _id: tuitionId });
-
   return res.json({
     success: true,
     message: 'Tuition deleted successfully',
-    data: {
-      id: tuitionId.toString(),
-      deletedApplications: applications.deletedCount,
-    },
+    data: deleted,
   });
 });
 
