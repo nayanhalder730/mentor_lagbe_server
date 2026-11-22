@@ -88,9 +88,11 @@ test('tutor self-deletion removes applications and bookmark references', async (
   assert.ok(applicationDelete, 'applications must be deleted');
   assert.deepEqual(applicationDelete.filter, { tuitionId });
   assert.ok(bookmarkPull, 'saved bookmark ids must be pulled');
-  assert.deepEqual(bookmarkPull.filter, { savedTuitionIds: tuitionId });
+  assert.deepEqual(bookmarkPull.filter, {
+    savedTuitionIds: { $in: [tuitionId, tuitionId.toString()] },
+  });
   assert.deepEqual(bookmarkPull.update, {
-    $pull: { savedTuitionIds: tuitionId },
+    $pull: { savedTuitionIds: { $in: [tuitionId, tuitionId.toString()] } },
   });
   assert.ok(tuitionDelete, 'the tuition itself must be deleted');
 

@@ -757,10 +757,13 @@ router.delete('/:id', verifyToken, verifyAdmin, async (req, res) => {
         _id: { $in: tuitionIds },
       });
 
-      // Remove dangling bookmark references from every remaining user.
+      // Remove dangling bookmark references from every remaining user,
+      // including legacy string-form ids.
+      const bookmarkValues = [...tuitionIds, ...tuitionIdStrings];
+
       await users.updateMany(
-        { savedTuitionIds: { $in: tuitionIds } },
-        { $pull: { savedTuitionIds: { $in: tuitionIds } } }
+        { savedTuitionIds: { $in: bookmarkValues } },
+        { $pull: { savedTuitionIds: { $in: bookmarkValues } } }
       );
     }
 

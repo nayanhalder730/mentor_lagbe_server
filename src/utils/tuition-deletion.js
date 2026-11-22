@@ -43,9 +43,12 @@ export async function deleteTuitionWithReferences(
   }
 
   const applicationsResult = await applications.deleteMany({ tuitionId });
+  // Saved ids are normally ObjectIds, but legacy data can contain the string
+  // form. Remove both so no dangling reference survives the delete.
+  const bookmarkValues = [tuitionId, tuitionId.toString()];
   const usersResult = await users.updateMany(
-    { savedTuitionIds: tuitionId },
-    { $pull: { savedTuitionIds: tuitionId } }
+    { savedTuitionIds: { $in: bookmarkValues } },
+    { $pull: { savedTuitionIds: { $in: bookmarkValues } } }
   );
   const tuitionResult = await tuitions.deleteOne(filter);
 
