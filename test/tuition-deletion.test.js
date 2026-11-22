@@ -20,32 +20,64 @@ function createFakeDb({
   deletedApplications = 2,
   modifiedBookmarks = 1,
   deletedTuitions = 1,
+  failOn = null,
 } = {}) {
   const calls = [];
+  const session = {
+    committed: false,
+    aborted: false,
+    ended: false,
+    async withTransaction(fn) {
+      try {
+        const value = await fn();
+        this.committed = true;
+        return value;
+      } catch (error) {
+        this.aborted = true;
+        throw error;
+      }
+    },
+    async endSession() {
+      this.ended = true;
+    },
+  };
+
+  const maybeFail = (op) => {
+    if (failOn === op) throw new Error(`simulated ${op} failure`);
+  };
+
   const db = {
+    client: {
+      startSession() {
+        return session;
+      },
+    },
     collection(name) {
       return {
         findOne: async (filter, options) => {
           calls.push({ op: 'findOne', name, filter, options });
           return tuition;
         },
-        deleteMany: async (filter) => {
-          calls.push({ op: 'deleteMany', name, filter });
+        deleteMany: async (filter, options) => {
+          calls.push({ op: 'deleteMany', name, filter, options });
+          maybeFail('applications');
           return { deletedCount: deletedApplications };
         },
-        updateMany: async (filter, update) => {
-          calls.push({ op: 'updateMany', name, filter, update });
+        updateMany: async (filter, update, options) => {
+          calls.push({ op: 'updateMany', name, filter, update, options });
+          maybeFail('bookmarks');
           return { modifiedCount: modifiedBookmarks };
         },
-        deleteOne: async (filter) => {
-          calls.push({ op: 'deleteOne', name, filter });
+        deleteOne: async (filter, options) => {
+          calls.push({ op: 'deleteOne', name, filter, options });
+          maybeFail('tuition');
           return { deletedCount: deletedTuitions };
         },
       };
     },
   };
 
-  return { db, calls };
+  return { db, calls, session };
 }
 
 test('tuition delete filter is ownership-scoped for tutors', () => {
@@ -64,7 +96,7 @@ test('tuition delete filter is ownership-scoped for tutors', () => {
 test('tutor self-deletion removes applications and bookmark references', async () => {
   const tuitionId = new ObjectId();
   const tutorId = new ObjectId();
-  const { db, calls } = createFakeDb();
+  const { db, calls, session } = createFakeDb();
 
   const result = await deleteTuitionWithReferences(tuitionId, {
     tutorId,
@@ -94,6 +126,7 @@ test('tutor self-deletion removes applications and bookmark references', async (
   assert.deepEqual(bookmarkPull.update, {
     $pull: { savedTuitionIds: { $in: [tuitionId, tuitionId.toString()] } },
   });
+  assert.equal(bookmarkPull.options?.session, session);
   assert.ok(tuitionDelete, 'the tuition itself must be deleted');
 
   // Ordering keeps references from outliving the tuition lookup.
@@ -157,4 +190,72 @@ test('tutor and admin tuition delete routes keep their role guards', () => {
   assert.equal(tutorHandlers.includes(verifyAdmin), false);
   assert.ok(adminHandlers.includes(verifyToken));
   assert.ok(adminHandlers.includes(verifyAdmin));
+});
+
+test('cleanup and tuition delete commit in one transaction with the same session', async () => {
+  const tuitionId = new ObjectId();
+  const tutorId = new ObjectId();
+  const { db, calls, session } = createFakeDb();
+
+  const result = await deleteTuitionWithReferences(tuitionId, {
+    tutorId,
+    db,
+  });
+
+  assert.equal(result.id, tuitionId.toString());
+  assert.equal(session.committed, true);
+  assert.equal(session.aborted, false);
+  assert.equal(session.ended, true);
+
+  const writeOps = calls.filter((call) => call.op !== 'findOne');
+  assert.equal(writeOps.length, 3);
+  assert.equal(
+    writeOps.every((call) => call.options?.session === session),
+    true,
+    'every write must join the same transaction'
+  );
+  assert.equal(calls[0].options.session, session);
+});
+
+test('an application cleanup failure aborts the whole transaction', async () => {
+  const { db, calls, session } = createFakeDb({ failOn: 'applications' });
+
+  await assert.rejects(
+    deleteTuitionWithReferences(new ObjectId(), { db }),
+    /simulated applications failure/
+  );
+
+  assert.equal(session.aborted, true);
+  assert.equal(session.committed, false);
+  assert.equal(session.ended, true);
+  assert.equal(
+    calls.some((call) => call.op === 'deleteOne'),
+    false,
+    'the tuition must not be deleted when cleanup fails'
+  );
+});
+
+test('a bookmark cleanup failure also aborts the transaction', async () => {
+  const { db, session } = createFakeDb({ failOn: 'bookmarks' });
+
+  await assert.rejects(
+    deleteTuitionWithReferences(new ObjectId(), { db }),
+    /simulated bookmarks failure/
+  );
+
+  assert.equal(session.aborted, true);
+  assert.equal(session.committed, false);
+  assert.equal(session.ended, true);
+});
+
+test('a lost delete race aborts cleanup instead of committing orphan references', async () => {
+  const { db, calls, session } = createFakeDb({ deletedTuitions: 0 });
+
+  const result = await deleteTuitionWithReferences(new ObjectId(), { db });
+
+  assert.equal(result, null);
+  assert.equal(session.aborted, true);
+  assert.equal(session.committed, false);
+  assert.equal(session.ended, true);
+  assert.equal(calls.some((call) => call.op === 'deleteOne'), true);
 });
